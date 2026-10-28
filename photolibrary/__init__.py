@@ -1,0 +1,1 @@
+"""Photo Library desktop app."""

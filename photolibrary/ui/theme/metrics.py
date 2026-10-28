@@ -1,0 +1,15 @@
+class Metrics:
+    SPACE_1 = 4
+    SPACE_2 = 8
+    SPACE_3 = 12
+    SPACE_4 = 16
+    SPACE_5 = 20
+    SPACE_6 = 24
+    SPACE_8 = 32
+    RADIUS_SMALL = 6
+    RADIUS = 9
+    RADIUS_LARGE = 12
+    CONTROL_HEIGHT = 34
+    ICON_SIZE = 16
+    CONTENT_MAX_WIDTH = 1480
+    CARD_MIN_WIDTH = 250

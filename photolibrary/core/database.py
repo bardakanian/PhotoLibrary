@@ -1,0 +1,172 @@
+import sqlite3
+import threading
+from datetime import datetime
+from pathlib import Path
+
+from .constants import APP_DIR, DB_FILE, THUMBNAIL_DIR
+from .models import Album, MediaItem
+
+SCHEMA_VERSION = 1
+
+_ITEM_COLUMNS = """
+    id, file_path, album, file_size, modified_ns, capture_ts, media_type,
+    width, height, camera, duration
+"""
+
+
+def ensure_app_dirs() -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_schema_lock = threading.Lock()
+_initialized: set[str] = set()
+
+
+def open_database() -> sqlite3.Connection:
+    """Open (and create if needed) the index. Each thread opens its own connection."""
+    ensure_app_dirs()
+    connection = sqlite3.connect(DB_FILE, timeout=30)
+    connection.execute("PRAGMA synchronous=NORMAL")
+    key = str(DB_FILE)
+    if key not in _initialized:
+        # Schema and WAL setup need an exclusive lock; do it once per process, not per connection.
+        with _schema_lock:
+            if key not in _initialized:
+                _create_schema(connection)
+                _initialized.add(key)
+    return connection
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    # WAL lets grid queries on worker threads read while the indexer is writing.
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS media (
+            id INTEGER PRIMARY KEY,
+            folder_root TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            album TEXT NOT NULL DEFAULT '',
+            file_size INTEGER NOT NULL,
+            modified_ns INTEGER NOT NULL,
+            capture_ts TEXT,
+            capture_year INTEGER,
+            capture_month INTEGER,
+            capture_day INTEGER,
+            media_type TEXT NOT NULL DEFAULT 'image',
+            width INTEGER,
+            height INTEGER,
+            camera TEXT,
+            duration REAL,
+            metadata_version INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (folder_root, file_path)
+        )
+    """)
+    # SQLite sorts NULL lowest, so DESC order puts undated items last using this index.
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_media_order
+        ON media (folder_root, capture_ts DESC, id DESC)
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_media_album ON media (folder_root, album)")
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    connection.commit()
+
+
+def _item_from_row(row: tuple) -> MediaItem:
+    item_id, file_path, album, file_size, modified_ns, capture_ts, media_type, width, height, camera, duration = row
+    captured_at = None
+    if capture_ts:
+        try:
+            captured_at = datetime.fromisoformat(capture_ts)
+        except ValueError:
+            captured_at = None
+    return MediaItem(item_id, file_path, album or "", file_size, modified_ns, captured_at,
+                     media_type or "image", width, height, camera, duration)
+
+
+class MediaRepository:
+    """Read and delete operations on the index. Safe to call from any thread."""
+
+    def query(self, folder: Path, kind: str = "all", album: str | None = None, search=None) -> list[MediaItem]:
+        """Items newest first; undated items last. `search` is a core.search.SearchFilter."""
+        sql = f"SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ?"
+        params: list[object] = [str(Path(folder).resolve())]
+        if kind == "photos":
+            sql += " AND media_type = 'image'"
+        elif kind == "videos":
+            sql += " AND media_type = 'video'"
+        if album is not None:
+            sql += " AND album = ?"
+            params.append(album)
+        if search is not None:
+            clause, search_params = search.sql()
+            if clause:
+                sql += " AND " + clause
+                params.extend(search_params)
+        sql += " ORDER BY capture_ts DESC, id DESC"
+        connection = open_database()
+        try:
+            return [_item_from_row(row) for row in connection.execute(sql, params)]
+        finally:
+            connection.close()
+
+    def get(self, item_id: int) -> MediaItem | None:
+        connection = open_database()
+        try:
+            row = connection.execute(f"SELECT {_ITEM_COLUMNS} FROM media WHERE id = ?", (item_id,)).fetchone()
+            return _item_from_row(row) if row else None
+        finally:
+            connection.close()
+
+    def counts(self, folder: Path) -> dict[str, int]:
+        connection = open_database()
+        try:
+            total, videos = connection.execute("""
+                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0) FROM media WHERE folder_root = ?
+            """, (str(Path(folder).resolve()),)).fetchone()
+            return {"all": int(total), "photos": int(total - videos), "videos": int(videos)}
+        finally:
+            connection.close()
+
+    def albums(self, folder: Path) -> list[Album]:
+        """Top-level subfolders that contain media, alphabetically, each with its newest item as cover."""
+        folder_root = str(Path(folder).resolve())
+        connection = open_database()
+        try:
+            rows = connection.execute("""
+                SELECT album, COUNT(*) FROM media
+                WHERE folder_root = ? AND album != ''
+                GROUP BY album ORDER BY album COLLATE NOCASE
+            """, (folder_root,)).fetchall()
+            albums = []
+            for name, count in rows:
+                cover = connection.execute(f"""
+                    SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ? AND album = ?
+                    ORDER BY capture_ts DESC, id DESC LIMIT 1
+                """, (folder_root, name)).fetchone()
+                albums.append(Album(name, int(count), _item_from_row(cover) if cover else None))
+            return albums
+        finally:
+            connection.close()
+
+    def remove_many(self, folder: Path, item_ids: list[int]) -> int:
+        """Remove index rows for one folder. Returns how many rows went away."""
+        if not item_ids:
+            return 0
+        folder_root = str(Path(folder).resolve())
+        connection = open_database()
+        try:
+            removed = 0
+            # Stay well under SQLite's bound-parameter limit.
+            for start in range(0, len(item_ids), 500):
+                chunk = list(item_ids[start:start + 500])
+                placeholders = ",".join("?" * len(chunk))
+                cursor = connection.execute(
+                    f"DELETE FROM media WHERE folder_root = ? AND id IN ({placeholders})", [folder_root, *chunk]
+                )
+                removed += cursor.rowcount
+            connection.commit()
+            return removed
+        finally:
+            connection.close()
