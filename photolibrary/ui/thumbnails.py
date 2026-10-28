@@ -20,7 +20,7 @@ from ..core.workqueue import WorkQueue
 # Decode sizes (device pixels of the cell's shorter side). Few buckets keep the cache
 # effective across zoom levels; the painter scales the small remaining difference.
 BUCKETS = (96, 160, 256, 384, 512)
-CACHE_BYTES = 320 * 1024 * 1024
+CACHE_BYTES = 480 * 1024 * 1024
 
 
 def bucket_for(pixels: float) -> int:

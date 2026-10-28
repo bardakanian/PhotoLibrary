@@ -158,6 +158,9 @@ def main() -> None:
     then(lambda: save(window, "months-dark"))
     then(prepare_search)
     then(lambda: save(window, "search"))
+    then(lambda: (window.clear_search(), window.sidebar.select_scope("all", None), window.show_insights()))
+    then(lambda: save(window, "insights"))
+    then(window.close_insights)
     then(prepare_viewer)
     then(open_viewer)
     then(lambda: None)  # give the full-size decode a moment to replace the thumbnail

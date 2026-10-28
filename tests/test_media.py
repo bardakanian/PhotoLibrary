@@ -1,7 +1,10 @@
 import os
 import subprocess
+import sys
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
@@ -164,3 +167,86 @@ class FileManagerTests(unittest.TestCase):
         from pathlib import Path
         with patch.object(media.subprocess, "Popen", side_effect=OSError("nope")):
             self.assertEqual(media.reveal_in_file_manager(Path("/x.jpg")), (False, "nope"))
+
+
+_real_spotlight_lookup = media.parse_macos_metadata_date  # captured before TempAppTestCase stubs it
+
+
+class CopiedFileDateTests(TempAppTestCase):
+    """Files without embedded dates that were copied (backups, exports) after they were made.
+
+    Regression: they were dated by the copy time, so a backup made in June filed photos
+    from January to May under June.
+    """
+
+    def copied_file(self, name: str, made: datetime, data: bytes | None = None):
+        path = self.root / name
+        if data is None:
+            Image.new("RGB", (8, 8), "teal").save(path)  # no EXIF
+        else:
+            path.write_bytes(data)
+        stamp = made.timestamp()
+        os.utime(path, (stamp, stamp))  # modification time survives a copy; creation time is "now"
+        return path
+
+    def test_image_without_metadata_uses_earliest_file_time(self):
+        path = self.copied_file("screenshot.png", datetime(2026, 1, 3, 7, 52, 14))
+        self.assertEqual(media.read_metadata(path, "image").captured_at, datetime(2026, 1, 3, 7, 52, 14))
+
+    def test_video_without_metadata_uses_earliest_file_time(self):
+        path = self.copied_file("clip.mp4", datetime(2026, 1, 2, 22, 9, 34), data=b"not really a video")
+        self.assertEqual(media.read_metadata(path, "video").captured_at, datetime(2026, 1, 2, 22, 9, 34))
+
+    def test_spotlight_copy_time_is_ignored(self):
+        copy_time = datetime(2026, 6, 26, 18, 9, 53)
+        self.assertIsNone(media.choose_spotlight_date(copy_time, copy_time))
+        self.assertIsNone(media.choose_spotlight_date(copy_time, copy_time + timedelta(seconds=1)))
+        self.assertIsNone(media.choose_spotlight_date(None, copy_time))
+
+    def test_spotlight_content_date_is_used_when_it_differs(self):
+        taken, copied = datetime(2026, 1, 3, 7, 52), datetime(2026, 6, 26, 18, 9)
+        self.assertEqual(media.choose_spotlight_date(taken, copied), taken)
+        self.assertEqual(media.choose_spotlight_date(taken, None), taken)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Spotlight is macOS-only")
+    def test_spotlight_lookup_parses_both_fields(self):
+        def fake_mdls(stdout):
+            return patch.object(media.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout, ""))
+
+        same = "2026-06-27 01:09:53 +0000\x002026-06-27 01:09:53 +0000"
+        with fake_mdls(same):
+            self.assertIsNone(_real_spotlight_lookup(self.root / "x.jpg"))
+        different = "2026-01-03 15:52:14 +0000\x002026-06-27 01:09:53 +0000"
+        expected = datetime.fromisoformat("2026-01-03 15:52:14+00:00").astimezone().replace(tzinfo=None)
+        with fake_mdls(different):
+            self.assertEqual(_real_spotlight_lookup(self.root / "x.jpg"), expected)
+        with fake_mdls("(null)\x00(null)"):
+            self.assertIsNone(_real_spotlight_lookup(self.root / "x.jpg"))
+
+    def test_embedded_date_still_wins(self):
+        path = self.write_photo(self.root / "camera.jpg", datetime(2025, 8, 24, 20, 23, 3))
+        os.utime(path, (datetime(2026, 6, 26).timestamp(),) * 2)
+        self.assertEqual(media.read_metadata(path, "image").captured_at, datetime(2025, 8, 24, 20, 23, 3))
+
+
+class PlaceholderDateTests(unittest.TestCase):
+    """Epoch and unset-clock dates (1969/1970, 1980, 1904, far future) are not capture dates."""
+
+    def test_placeholder_dates(self):
+        for value in (datetime(1969, 12, 31, 16, 0), datetime(1970, 1, 1), datetime(1980, 1, 1, 0, 0, 45),
+                      datetime(1904, 1, 1), datetime(1899, 5, 1), datetime(datetime.now().year + 2, 1, 1)):
+            self.assertTrue(media.is_placeholder_date(value), value)
+        for value in (datetime(2026, 1, 3, 7, 52), datetime(1999, 11, 16, 16, 40), datetime(1980, 1, 3),
+                      datetime(1971, 6, 1)):
+            self.assertFalse(media.is_placeholder_date(value), value)
+
+    def test_unset_camera_clock_falls_back_to_file_time(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "IMG_7469.JPG"
+            exif = Image.Exif()
+            exif[306] = "1980:01:01 00:00:06"  # what a camera with an unset clock writes
+            Image.new("RGB", (8, 8)).save(path, exif=exif)
+            made = datetime(2017, 8, 16, 17, 26, 0)
+            os.utime(path, (made.timestamp(), made.timestamp()))
+            with patch.object(media, "parse_macos_metadata_date", return_value=None):
+                self.assertEqual(media.get_capture_date(path, "image"), made)

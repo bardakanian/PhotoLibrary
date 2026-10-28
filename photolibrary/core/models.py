@@ -53,3 +53,37 @@ class Album:
     name: str
     count: int
     cover: MediaItem | None
+
+
+@dataclass(frozen=True, slots=True)
+class YearMediaCount:
+    year: int
+    photos: int
+    videos: int
+
+    @property
+    def total(self) -> int:
+        return self.photos + self.videos
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsResult:
+    """Folder-wide aggregates calculated from the index only (no file access)."""
+
+    total_photos: int
+    total_videos: int
+    combined_total: int
+    busiest_day: tuple[int, int] | None          # (month, day)
+    busiest_day_count: int
+    largest_year: int | None
+    largest_year_count: int
+    media_by_year: tuple[YearMediaCount, ...]
+    most_active_month: int | None
+    most_active_month_count: int
+    total_bytes: int = 0
+    oldest: datetime | None = None
+    newest: datetime | None = None
+    undated_count: int = 0
+    top_camera: str | None = None
+    top_camera_count: int = 0
+    camera_count: int = 0

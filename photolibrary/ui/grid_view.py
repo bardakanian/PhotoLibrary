@@ -14,7 +14,7 @@ from ..core.grid_layout import GridLayout
 from ..core.settings import MAX_ZOOM, MIN_ZOOM
 from .grid_model import GridModel, ItemRole, SummaryRole
 from .theme.typography import Typography
-from .thumbnails import ThumbnailLoader, bucket_for
+from .thumbnails import CACHE_BYTES, ThumbnailLoader, bucket_for
 
 # Per-mode geometry: target cell width, spacing, margin, header height, gap, aspect.
 MODE_GEOMETRY = {
@@ -195,6 +195,11 @@ class MediaGridView(QAbstractItemView):
         self._focus_timer.setSingleShot(True)
         self._focus_timer.setInterval(50)
         self._focus_timer.timeout.connect(self._focus_thumbnails)
+        # Once scrolling pauses, load several screens around the visible ones into memory.
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.setInterval(350)
+        self._idle_timer.timeout.connect(self._prefetch_around)
         self.verticalScrollBar().valueChanged.connect(self._schedule_focus)
         loader.updated.connect(self._thumbnail_updated)
         self.doubleClicked.connect(self.open_requested)
@@ -503,6 +508,7 @@ class MediaGridView(QAbstractItemView):
     def _schedule_focus(self, *_args) -> None:
         if not self._focus_timer.isActive():
             self._focus_timer.start()
+        self._idle_timer.start()  # restarts on every scroll step, so it fires once scrolling stops
 
     def _focus_thumbnails(self) -> None:
         model = self.model()
@@ -518,6 +524,30 @@ class MediaGridView(QAbstractItemView):
         items = [item for item in (model.item_at(row) for row in rows) if item is not None]
         rect = self._layout.rect_for(visible.start if visible else 0)
         bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF())
+        self.loader.focus(items, bucket)
+
+    def _prefetch_around(self) -> None:
+        """Visible cells first, then up to 5 screens ahead and 2 behind, within the memory budget."""
+        model = self.model()
+        if model is None or not self._layout.item_count:
+            return
+        offset, height = self.verticalOffset(), self.viewport().height()
+        visible = self._layout.indexes_in(offset, offset + height)
+        rect = self._layout.rect_for(visible.start if visible else 0)
+        bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF())
+        # A decoded thumbnail is about bucket x (4/3 bucket) x 4 bytes; keep a quarter of the cache spare.
+        budget = max(len(visible), int(CACHE_BYTES * 0.75 // (bucket * bucket * 4 * 4 // 3)))
+        rows = list(visible)
+        for screen in range(1, 6):
+            rows += list(self._layout.indexes_in(offset + screen * height, offset + (screen + 1) * height))
+            if screen <= 2:
+                behind = self._layout.indexes_in(offset - screen * height, offset - (screen - 1) * height)
+                rows += [row for row in reversed(behind)]
+            if len(rows) >= budget:
+                break
+        seen = set()
+        ordered = [row for row in rows if not (row in seen or seen.add(row))][:budget]
+        items = [item for item in (model.item_at(row) for row in ordered) if item is not None]
         self.loader.focus(items, bucket)
 
     def _thumbnail_updated(self, item_id: int) -> None:

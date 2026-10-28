@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .constants import APP_DIR, DB_FILE, THUMBNAIL_DIR
-from .models import Album, MediaItem
+from .models import Album, AnalyticsResult, MediaItem, YearMediaCount
 
 SCHEMA_VERSION = 1
 
@@ -168,5 +168,85 @@ class MediaRepository:
                 removed += cursor.rowcount
             connection.commit()
             return removed
+        finally:
+            connection.close()
+
+    def library_analytics(self, folder: Path) -> AnalyticsResult:
+        """Library Insights for one folder, from the index only.
+
+        Ties are deterministic: the earliest calendar day, year or month wins (and the
+        alphabetically first camera). Each date-based figure ignores only the rows missing
+        the parts it needs, so a row with a month but no year still counts by month.
+        """
+        folder_root = str(Path(folder).resolve())
+        connection = open_database()
+        try:
+            combined, videos, total_bytes, undated, oldest, newest = connection.execute("""
+                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0), COALESCE(SUM(file_size), 0),
+                       COALESCE(SUM(capture_ts IS NULL), 0), MIN(capture_ts), MAX(capture_ts)
+                FROM media WHERE folder_root = ?
+            """, (folder_root,)).fetchone()
+
+            busiest_row = connection.execute("""
+                SELECT capture_month, capture_day, COUNT(*) AS media_count
+                FROM media
+                WHERE folder_root = ? AND capture_month IS NOT NULL AND capture_day IS NOT NULL
+                GROUP BY capture_month, capture_day
+                ORDER BY media_count DESC, capture_month ASC, capture_day ASC
+                LIMIT 1
+            """, (folder_root,)).fetchone()
+
+            year_rows = connection.execute("""
+                SELECT capture_year,
+                       SUM(CASE WHEN media_type = 'video' THEN 0 ELSE 1 END),
+                       SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)
+                FROM media
+                WHERE folder_root = ? AND capture_year IS NOT NULL
+                GROUP BY capture_year ORDER BY capture_year ASC
+            """, (folder_root,)).fetchall()
+            media_by_year = tuple(YearMediaCount(int(year), int(photos), int(year_videos))
+                                  for year, photos, year_videos in year_rows)
+            largest = min(media_by_year, key=lambda item: (-item.total, item.year), default=None)
+
+            month_row = connection.execute("""
+                SELECT capture_month, COUNT(*) AS media_count
+                FROM media
+                WHERE folder_root = ? AND capture_month IS NOT NULL
+                GROUP BY capture_month ORDER BY media_count DESC, capture_month ASC
+                LIMIT 1
+            """, (folder_root,)).fetchone()
+
+            camera_rows = connection.execute("""
+                SELECT camera, COUNT(*) AS media_count
+                FROM media
+                WHERE folder_root = ? AND camera IS NOT NULL AND camera != ''
+                GROUP BY camera ORDER BY media_count DESC, camera ASC
+            """, (folder_root,)).fetchall()
+
+            def parse(value):
+                try:
+                    return datetime.fromisoformat(value) if value else None
+                except ValueError:
+                    return None
+
+            return AnalyticsResult(
+                total_photos=int(combined - videos),
+                total_videos=int(videos),
+                combined_total=int(combined),
+                busiest_day=(int(busiest_row[0]), int(busiest_row[1])) if busiest_row else None,
+                busiest_day_count=int(busiest_row[2]) if busiest_row else 0,
+                largest_year=largest.year if largest else None,
+                largest_year_count=largest.total if largest else 0,
+                media_by_year=media_by_year,
+                most_active_month=int(month_row[0]) if month_row else None,
+                most_active_month_count=int(month_row[1]) if month_row else 0,
+                total_bytes=int(total_bytes),
+                oldest=parse(oldest),
+                newest=parse(newest),
+                undated_count=int(undated),
+                top_camera=camera_rows[0][0] if camera_rows else None,
+                top_camera_count=int(camera_rows[0][1]) if camera_rows else 0,
+                camera_count=len(camera_rows),
+            )
         finally:
             connection.close()

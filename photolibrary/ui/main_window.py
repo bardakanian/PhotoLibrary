@@ -14,6 +14,7 @@ from ..core.database import MediaRepository
 from ..core.grouping import LibrarySnapshot, build_snapshot
 from ..core.indexer import MediaIndexer
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
+from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
 from ..core.search import SearchFilter, parse_query
 from ..core.settings import MAX_ZOOM, MIN_ZOOM, SettingsStore
@@ -21,6 +22,7 @@ from .dialogs import PreferencesDialog
 from .grid_model import GridModel
 from .grid_view import MediaGridView
 from .pages.grid_page import GridPage
+from .pages.insights_page import LibraryInsightsPage
 from .pages.viewer_page import ViewerPage
 from .tasks import run_async
 from .theme import ThemeManager
@@ -64,6 +66,12 @@ class MainWindow(QMainWindow):
         self.scanning = False
         self.index_events = IndexEvents()
         self.index_events.received.connect(self._handle_index_event)
+        # Background creation of every missing thumbnail, started after each scan.
+        self.warm_events = IndexEvents()
+        self.warm_events.received.connect(self._handle_warm_event)
+        self.warm_stop = threading.Event()
+        self.warm_id = 0
+        self.ready_text = "Ready"
         # While a scan is adding items, refresh the grid at most every few seconds.
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
@@ -82,6 +90,7 @@ class MainWindow(QMainWindow):
         self.info_timer.setInterval(0)
         self.info_timer.timeout.connect(self._update_info)
         self.trash_in_progress = False
+        self.insights_request_id = 0
         self.settings_timer = QTimer(self)
         self.settings_timer.setSingleShot(True)
         self.settings_timer.setInterval(600)
@@ -133,6 +142,10 @@ class MainWindow(QMainWindow):
         self.rescan_button.setToolTip("Look for added, changed and removed files (⌘R)")
         self.rescan_button.clicked.connect(self.start_indexing)
         toolbar_layout.addWidget(self.rescan_button)
+        self.insights_button = QPushButton("Insights")
+        self.insights_button.setToolTip("Library Insights: totals, storage, busiest times (⌘⇧I)")
+        self.insights_button.clicked.connect(self.show_insights)
+        toolbar_layout.addWidget(self.insights_button)
         toolbar_layout.addStretch(1)
 
         segmented = QFrame()
@@ -224,9 +237,16 @@ class MainWindow(QMainWindow):
         self.viewer_info_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.viewer_info_button.clicked.connect(self.toggle_info)
         self.viewer.top_bar_layout.addWidget(self.viewer_info_button)
+        self.insights = LibraryInsightsPage(self.theme.colors)
+        self.insights.back_requested.connect(self.close_insights)
+        self.insights.choose_folder_requested.connect(self.choose_folder)
+        self.insights.rescan_requested.connect(self.start_indexing)
+        self.insights.retry_requested.connect(self.load_insights)
+        self.theme.changed.connect(lambda _preference: self.insights.set_theme_colors(self.theme.colors))
         self.stack = QStackedWidget()
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.viewer)
+        self.stack.addWidget(self.insights)
         self.sidebar = Sidebar(self.loader, self.theme)
         self.sidebar.scope_changed.connect(self.set_scope)
         self.sidebar.setVisible(self.settings.sidebar_visible)
@@ -295,6 +315,7 @@ class MainWindow(QMainWindow):
         self.sidebar_action = action(view_menu, "Show Sidebar", "Ctrl+Alt+S", self.toggle_sidebar, checkable=True)
         self.sidebar_action.setChecked(self.settings.sidebar_visible)
         self.info_action = action(view_menu, "Show Info", "Ctrl+I", self.toggle_info, checkable=True)
+        action(view_menu, "Library Insights", "Ctrl+Shift+I", self.show_insights)
         self.info_action.setChecked(self.settings.info_panel_visible)
         view_menu.addSeparator()
         self.mode_actions = QActionGroup(self)
@@ -353,6 +374,7 @@ class MainWindow(QMainWindow):
             return
         folder = Path(selected)
         self.stop_event.set()
+        self.stop_warming()
         self.settings.library_folder = folder
         self._save_settings()
         self.loader.reset()
@@ -363,6 +385,8 @@ class MainWindow(QMainWindow):
         self.sidebar.select_scope("all", None, notify=False)
         self._update_folder_label()
         self.refresh_library(keep_position=False)
+        if self.insights_active:
+            self.load_insights()
         self.start_indexing()
 
     def _empty_action(self, action: str) -> None:
@@ -388,6 +412,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(80, self.start_indexing)
             return
         self.pending_index_start = False
+        self.stop_warming()  # leave the disk and CPU to the scan; warming restarts afterwards
         self.active_scan_id += 1
         self.stop_event = threading.Event()
         indexer = MediaIndexer(self.root_folder, self.stop_event, self.active_scan_id, self.index_events.received.emit)
@@ -432,12 +457,16 @@ class MainWindow(QMainWindow):
                     parts.append(f"{event['deleted']:,} removed")
                 if event["errors"]:
                     parts.append(f"{event['errors']:,} unreadable")
-                self.status.setText("Library ready  ·  " + "  ·  ".join(parts))
+                self.ready_text = "Library ready  ·  " + "  ·  ".join(parts)
+                self.status.setText(self.ready_text)
                 self.reload_timer.stop()
                 if event["updated"] or event["deleted"] or not self.snapshot:
                     self.refresh_library()
                 else:
                     self._update_empty_state()
+                if self.insights_active:
+                    self.load_insights()
+                self.start_warming()
             elif event_type == "scan_cancelled":
                 self.status.setText("Indexing cancelled")
             else:
@@ -513,6 +542,7 @@ class MainWindow(QMainWindow):
     def focus_search(self) -> None:
         if self.viewer_active:
             self.close_viewer()
+        self.close_insights()
         self.search_box.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.search_box.selectAll()
 
@@ -650,6 +680,7 @@ class MainWindow(QMainWindow):
         """Switch Years/Months/All. Keeps roughly the same point in time on screen."""
         if self.viewer_active:
             self.close_viewer()
+        self.close_insights()
         if focus_index is None:
             focus_index = self._focused_item_index()
         if mode != self.model.mode:
@@ -701,7 +732,7 @@ class MainWindow(QMainWindow):
 
     def open_current(self) -> None:
         index = self.view.currentIndex()
-        if not self.viewer_active and index.isValid():
+        if not self.viewer_active and not self.insights_active and index.isValid():
             self._open_index(index)
 
     def open_viewer(self, row: int) -> None:
@@ -754,6 +785,104 @@ class MainWindow(QMainWindow):
 
         run_async(self.io_pool, command, done)
 
+    # Thumbnail warming -----------------------------------------------------
+
+    def start_warming(self) -> None:
+        """Create every missing thumbnail in the background, newest first."""
+        folder = self.root_folder
+        if folder is None:
+            return
+        self.stop_warming()
+        self.warm_id += 1
+        warm_id = self.warm_id
+        stop = self.warm_stop = threading.Event()
+        repository = self.repository
+        emit = self.warm_events.received.emit
+
+        def run():
+            try:
+                items = repository.query(folder)
+                result = warm_thumbnails(
+                    items, stop, lambda done, total: emit({"type": "progress", "id": warm_id, "done": done,
+                                                           "total": total}))
+                emit({"type": "done", "id": warm_id, "result": result})
+            except Exception as exc:  # reported on the UI thread
+                emit({"type": "error", "id": warm_id, "message": str(exc)})
+
+        threading.Thread(target=run, daemon=True, name="thumbnail-warmer").start()
+
+    def stop_warming(self) -> None:
+        self.warm_stop.set()
+
+    def _handle_warm_event(self, event: dict) -> None:
+        if event.get("id") != self.warm_id or self.scanning:
+            return
+        if event["type"] == "progress":
+            done, total = event["done"], event["total"]
+            self.progress.setRange(0, max(1, total))
+            self.progress.setValue(done)
+            self.progress.show()
+            self.status.setText(f"Preparing thumbnails  ·  {done:,} of {total:,}  ·  scrolling gets faster as this finishes")
+        elif event["type"] == "done":
+            result: WarmResult = event["result"]
+            self.progress.hide()
+            if result.missing and not result.cancelled:
+                note = f"  ·  {result.failed:,} without a preview" if result.failed else ""
+                self.status.setText(f"{self.ready_text}  ·  all thumbnails ready{note}")
+        else:
+            self.progress.hide()
+            LOGGER.error("Thumbnail preparation failed: %s", event.get("message"))
+
+    # Library Insights ------------------------------------------------------
+
+    @property
+    def insights_active(self) -> bool:
+        return self.stack.currentWidget() is self.insights
+
+    def show_insights(self) -> None:
+        if self.viewer_active:
+            self.close_viewer()
+        if not self.insights_active:
+            self.toolbar.hide()
+            self.sidebar.hide()
+            self.info_panel.hide()
+            self.stack.setCurrentWidget(self.insights)
+        self.insights.setFocus()
+        self.load_insights()
+
+    def close_insights(self) -> None:
+        if not self.insights_active:
+            return
+        self.stack.setCurrentWidget(self.grid_page)
+        self.toolbar.show()
+        self.sidebar.setVisible(self.settings.sidebar_visible)
+        self.info_panel.setVisible(self.settings.info_panel_visible)
+        self.view.setFocus()
+
+    def load_insights(self) -> None:
+        """Query the index on a worker thread; only the latest request's result is shown."""
+        self.insights_request_id += 1
+        request_id = self.insights_request_id
+        folder = self.root_folder
+        if folder is None:
+            self.insights.set_folder_name("")
+            self.insights.show_no_folder()
+            return
+        self.insights.set_folder_name(folder.name)
+        self.insights.show_loading()
+        repository = self.repository
+
+        def done(result):
+            if request_id == self.insights_request_id and folder == self.root_folder:
+                self.insights.set_result(result)
+
+        def failed(error):
+            if request_id == self.insights_request_id:
+                LOGGER.error("Could not load Library Insights", exc_info=error)
+                self.insights.show_error()
+
+        run_async(self.io_pool, lambda: repository.library_analytics(folder), done, failed)
+
     # Selection, info and trash ---------------------------------------------
 
     def selected_items(self) -> list:
@@ -804,7 +933,7 @@ class MainWindow(QMainWindow):
     def toggle_info(self) -> None:
         visible = not self.settings.info_panel_visible
         self.settings.info_panel_visible = visible
-        self.info_panel.setVisible(visible)
+        self.info_panel.setVisible(visible and not self.insights_active)
         for control in (self.info_action, self.info_button, self.viewer_info_button):
             control.setChecked(visible)
         self.settings_timer.start()
@@ -951,6 +1080,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop_event.set()
+        self.stop_warming()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self._save_settings()
         self.query_pool.clear()

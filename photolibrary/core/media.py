@@ -3,7 +3,8 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -41,23 +42,71 @@ def media_type_for_path(path: Path) -> str:
     return "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image"
 
 
+# Clocks that were never set, and "zero" timestamps, show up as these dates. They are never real
+# capture times; treating them as missing lets the next source of a date be used instead.
+_PLACEHOLDER_DAYS = {(1904, 1, 1), (1970, 1, 1), (1980, 1, 1)}
+
+
+def is_placeholder_date(value: datetime) -> bool:
+    """True for epoch and unset-clock dates (checked a day either side to allow for time zones)."""
+    if value.year < 1900 or value.year > datetime.now().year + 1:
+        return True
+    for offset in (-1, 0, 1):
+        day = value + timedelta(days=offset)
+        if (day.year, day.month, day.day) in _PLACEHOLDER_DAYS:
+            return True
+    return False
+
+
+def _usable(value: datetime | None) -> datetime | None:
+    return value if value is not None and not is_placeholder_date(value) else None
+
+
+_SPOTLIGHT_FIELDS = ("kMDItemContentCreationDate", "kMDItemFSCreationDate")
+# Spotlight dates within this many seconds of the file's own creation time carry no extra information.
+_SAME_MOMENT_SECONDS = 2
+
+
+def _parse_spotlight_value(value: str) -> datetime | None:
+    value = value.strip()
+    if not value or value == "(null)":
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def choose_spotlight_date(content_created: datetime | None, file_created: datetime | None) -> datetime | None:
+    """Spotlight's content date, but only when it says more than the file system does.
+
+    For files without embedded dates, Spotlight reports the file's own creation time as the
+    content date. That is when the file was copied to this disk (a backup, an export, a
+    download), not when the photo was taken, so it must not be used as a capture date.
+    """
+    if content_created is None:
+        return None
+    if file_created is not None and abs((content_created - file_created).total_seconds()) <= _SAME_MOMENT_SECONDS:
+        return None
+    return content_created
+
+
 def parse_macos_metadata_date(path: Path) -> datetime | None:
+    """A capture date Spotlight found inside the file, or None."""
     if sys.platform != "darwin":
         return None
-    for field in ("kMDItemContentCreationDate", "kMDItemFSCreationDate"):
-        try:
-            result = subprocess.run(
-                ["mdls", "-raw", "-name", field, str(path)],
-                capture_output=True, text=True, timeout=5, check=False,
-            )
-            value = result.stdout.strip()
-            if not value or value == "(null)":
-                continue
-            parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S %z")
-            return parsed.astimezone().replace(tzinfo=None)
-        except (OSError, subprocess.SubprocessError, ValueError):
-            continue
-    return None
+    try:
+        result = subprocess.run(
+            ["mdls", "-raw", *(arg for field in _SPOTLIGHT_FIELDS for arg in ("-name", field)), str(path)],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # With -raw, values are separated by NUL characters, in the order requested.
+    values = result.stdout.split("\0")
+    if len(values) < 2:
+        return None
+    return choose_spotlight_date(_parse_spotlight_value(values[0]), _parse_spotlight_value(values[1]))
 
 
 def _parse_exif_date(value) -> datetime | None:
@@ -186,19 +235,22 @@ def get_video_metadata_date(path: Path) -> datetime | None:
     return read_video_metadata(path).captured_at
 
 
-def get_filesystem_creation_date(path: Path) -> datetime | None:
+def get_filesystem_date(path: Path) -> datetime | None:
+    """The earlier of the file's creation and modification times.
+
+    Copying a file (to a backup drive, a new Mac, a cloud export) resets its creation time
+    to the copy time but keeps its modification time, so the earlier one is closer to when
+    the photo or video was actually made.
+    """
     try:
         stat = path.stat()
-        return datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime))
     except OSError:
         return None
-
-
-def _modified_date(path: Path) -> datetime | None:
-    try:
-        return datetime.fromtimestamp(path.stat().st_mtime)
-    except OSError:
-        return None
+    candidates = [datetime.fromtimestamp(stamp) for stamp in
+                  (stat.st_mtime, getattr(stat, "st_birthtime", stat.st_mtime)) if stamp > 0]
+    # Ignore zero and unset-clock timestamps some filesystems and memory cards report.
+    valid = [value for value in candidates if not is_placeholder_date(value)]
+    return min(valid or candidates, default=None)
 
 
 def read_metadata(path: Path, media_type: str) -> MediaMetadata:
@@ -208,11 +260,10 @@ def read_metadata(path: Path, media_type: str) -> MediaMetadata:
             found = read_image_metadata(path)
         except (OSError, ValueError, TypeError, SyntaxError):
             found = MediaMetadata(None)
-        captured = found.captured_at or parse_macos_metadata_date(path)
     else:
         found = read_video_metadata(path)
-        captured = found.captured_at or parse_macos_metadata_date(path) or get_filesystem_creation_date(path)
-    captured = captured or _modified_date(path)
+    # Embedded date first, then a date Spotlight found in the content, then the file's own times.
+    captured = _usable(found.captured_at) or _usable(parse_macos_metadata_date(path)) or get_filesystem_date(path)
     return MediaMetadata(captured, found.width, found.height, found.camera, found.duration)
 
 
@@ -292,21 +343,23 @@ def get_cached_thumbnail(path: Path, media_type: str, file_size: int, modified_n
         return None
     if media_type == "video" and not FFMPEG_ENABLED:
         return None
+    # Each attempt writes its own temporary file and renames it into place, so readers never
+    # see a half-written JPEG and two threads creating the same thumbnail can't clash.
+    partial = target.with_name(f"{target.stem}.{os.getpid()}-{threading.get_ident()}.part.jpg")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if media_type == "video":
-            if not _video_thumbnail(path, target):
+            if not _video_thumbnail(path, partial):
                 raise OSError("ffmpeg produced no frame")
         else:
-            # Write beside the target and rename, so a reader never sees a half-written JPEG.
-            partial = target.with_suffix(".part")
             _image_thumbnail(path, partial)
-            partial.replace(target)
+        partial.replace(target)
         return target
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         try:
-            target.unlink(missing_ok=True)
-            target.with_suffix(".part").unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
+            if target.exists():
+                return target  # another thread finished it meanwhile
             # Remember the failure so the file isn't re-decoded every time it is shown.
             # Skip this when the source is missing (e.g. an unmounted drive) so it retries later.
             # The cache key includes size and mtime, so editing the file also retries.

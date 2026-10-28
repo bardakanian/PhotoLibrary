@@ -32,6 +32,16 @@ incremental indexer) come from the On This Day app.
   always asks first, names what will be moved, and uses the system Trash (`QFile.moveToTrash`),
   so files can be restored. Trashed items leave the grid without a reload, the scroll
   position stays put and the next item is selected. Files that couldn't be moved are listed.
+- **Library Insights** (the **Insights** toolbar button or ⌘⇧I) gives a snapshot of the
+  whole library:
+  - photo, video and total counts, and the storage they use
+  - the date span from the oldest to the newest capture
+  - the most used camera
+  - the largest year, the most active month and the busiest calendar day
+  - a photos-and-videos-by-year chart; hover a bar for exact counts
+
+  It reads only the index, so it opens instantly and never rescans. It refreshes after
+  each scan. Esc returns to the grid.
 - **Empty states** for no folder, an empty library, an empty album, and no search results.
 - **Viewer**: double-click, Return or ⌘↓ opens an item full-window. ← and → step through
   the library. Esc (or ⌘↑) returns to the grid exactly where you left it.
@@ -72,6 +82,12 @@ Month tiles grouped by year, shown with the dark theme.
 Searching "2025" inside the Trips album.
 
 ![Search results for 2025 in the Trips album](assets/screenshots/search.png)
+
+### Library Insights
+
+Totals, storage, date span, the most used camera, the busiest times, and media by year.
+
+![Library Insights with nine summary cards and a media-by-year chart](assets/screenshots/insights.png)
 
 ### Viewer
 
@@ -151,6 +167,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Bigger / smaller thumbnails | ⌘= / ⌘− (or ⌘-scroll, or pinch) |
 | Show or hide the sidebar | ⌥⌘S |
 | Show or hide info | ⌘I |
+| Library Insights | ⌘⇧I (Esc returns) |
 | **Selecting** | |
 | Move between items | Arrow keys, Page Up/Down, Home/End |
 | Add to the selection / select a range | ⌘-click / ⇧-click (or ⇧-arrows) |
@@ -178,10 +195,21 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 - **The grid** (`ui/grid_view.py`) is a custom `QAbstractItemView`. Its geometry comes
   from `core/grid_layout.py`, which works on month sections, not individual items. Lookups
   are binary searches, so painting and hit-testing only touch the cells on screen.
-- **Thumbnails** (`ui/thumbnails.py`) are created on disk once (512 px, aspect kept)
-  and decoded on worker threads at about the cell's size. They're kept in an in-memory
-  LRU of about 320 MB. Queued work for cells that scrolled away is dropped, so what's
-  on screen loads first.
+- **Thumbnails** are created once and cached on disk (512 px, aspect kept). Creating
+  one means decoding the original: about 50 ms for a 12 MP JPEG and about 450 ms for a HEIC.
+  Reading a cached one takes about 1 ms.
+  - **Prepared in advance.** After each scan, `core/thumbnail_warmer.py` creates every
+    missing thumbnail in the background, newest first, using half the CPU cores. The
+    status bar shows its progress. Once it finishes, scrolling never waits on an original.
+    In a test with 150 ms per original, blank cells while scrolling dropped from 78% to 0%.
+    It's a one-time cost: rescans only prepare new or changed files.
+  - **Loaded around you.** `ui/thumbnails.py` decodes cached thumbnails on worker threads
+    at about the cell's size and keeps them in an in-memory LRU of about 480 MB. While you
+    scroll, visible cells load first and work for cells that scrolled away is dropped. When
+    you stop, the next 5 screens and the previous 2 are loaded too.
+  - **Why not everything in memory?** Each decoded thumbnail is about 0.5 MB, so a
+    50,000-item library would need about 25 GB of RAM. Disk-cached thumbnails plus
+    read-ahead give the same smooth scrolling at a fixed memory cost.
 - **The UI thread never reads files or the database.** Queries, grouping, settings
   writes and thumbnail decoding run in the background (`ui/tasks.py`).
 
@@ -212,7 +240,7 @@ photolibrary/
     ├── thumbnails.py      Background thumbnail loader and pixmap cache
     ├── tasks.py           run_async helper for background work
     ├── viewer_images.py   Background full-size photo decoding for the viewer
-    ├── pages/             Grid page and the full-window viewer
+    ├── pages/             Grid page, full-window viewer and Library Insights
     ├── theme/             Colours, typography, metrics, stylesheet
     └── widgets/           Sidebar, info panel, image canvas, video player, empty state, search box
 tests/                     unittest suite for the core

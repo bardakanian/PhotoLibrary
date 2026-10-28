@@ -22,4 +22,4 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 THUMBNAIL_EDGE = 512
 BATCH_COMMIT_SIZE = 250
 # Bump when read_metadata learns something new, so the next scan re-reads every file.
-METADATA_VERSION = 1
+METADATA_VERSION = 3  # 2: no copy-time dates for metadata-less files; 3: ignore epoch/unset-clock dates
