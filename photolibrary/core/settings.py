@@ -6,6 +6,7 @@ from .constants import APP_DIR, CONFIG_FILE
 
 VIEW_MODES = ("years", "months", "all")
 TIME_FORMATS = ("system", "12", "24")
+SORT_ORDERS = ("newest", "oldest")
 MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 80, 320, 160
 
 
@@ -16,6 +17,7 @@ class AppSettings:
     time_format: str = "system"  # "system", "12" or "24" hour clock
     zoom: int = DEFAULT_ZOOM
     view_mode: str = "all"
+    sort_order: str = "newest"  # "newest" or "oldest" first
     info_panel_visible: bool = False
     sidebar_visible: bool = True
     window_geometry: str = ""
@@ -50,6 +52,9 @@ class SettingsStore:
         time_format = str(data.get("time_format", "system"))
         if time_format not in TIME_FORMATS:
             time_format = "system"
+        sort_order = data.get("sort_order", "newest")
+        if sort_order not in SORT_ORDERS:
+            sort_order = "newest"
         view_mode = data.get("view_mode", "all")
         if view_mode not in VIEW_MODES:
             view_mode = "all"
@@ -59,6 +64,7 @@ class SettingsStore:
             time_format=time_format,
             zoom=zoom,
             view_mode=view_mode,
+            sort_order=sort_order,
             info_panel_visible=bool(data.get("info_panel_visible", False)),
             sidebar_visible=bool(data.get("sidebar_visible", True)),
             window_geometry=str(data.get("window_geometry", "")),
@@ -80,6 +86,7 @@ class SettingsStore:
             "time_format": settings.time_format,
             "zoom": settings.zoom,
             "view_mode": settings.view_mode,
+            "sort_order": settings.sort_order,
             "info_panel_visible": settings.info_panel_visible,
             "sidebar_visible": settings.sidebar_visible,
             "window_geometry": settings.window_geometry,

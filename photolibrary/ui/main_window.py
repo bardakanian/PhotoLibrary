@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._apply_mode_controls(self.settings.view_mode)
+        self._apply_sort_controls()
         QTimer.singleShot(0, self._startup)
 
     @property
@@ -166,6 +167,11 @@ class MainWindow(QMainWindow):
             self.mode_buttons[mode] = button
             segmented_layout.addWidget(button)
         toolbar_layout.addWidget(segmented)
+        self.sort_button = QPushButton()
+        self.sort_button.setProperty("variant", "ghost")
+        self.sort_button.setAccessibleName("Sort order")
+        self.sort_button.clicked.connect(self.toggle_sort_order)
+        toolbar_layout.addWidget(self.sort_button)
         toolbar_layout.addStretch(1)
 
         self.search_box = SearchBox("Search name or date")
@@ -327,6 +333,15 @@ class MainWindow(QMainWindow):
             self.mode_actions.addAction(item)
             self.mode_action_by_key[mode] = item
         view_menu.addSeparator()
+        self.sort_actions = QActionGroup(self)
+        self.sort_actions.setExclusive(True)
+        self.sort_action_by_key: dict[str, QAction] = {}
+        for order, label in (("newest", "Newest First"), ("oldest", "Oldest First")):
+            item = action(view_menu, label, "", lambda _checked=False, order=order: self.set_sort_order(order),
+                          checkable=True)
+            self.sort_actions.addAction(item)
+            self.sort_action_by_key[order] = item
+        view_menu.addSeparator()
         action(view_menu, "Zoom In", QKeySequence.StandardKey.ZoomIn, lambda: self.step_zoom(1))
         # ZoomIn is Ctrl++ on macOS; also accept Ctrl+= so no Shift is needed.
         action(view_menu, "Zoom In ", "Ctrl+=", lambda: self.step_zoom(1)).setVisible(False)
@@ -480,7 +495,8 @@ class MainWindow(QMainWindow):
 
     def query_arguments(self) -> dict:
         search = self.search_filter if self.search_filter and not self.search_filter.is_empty else None
-        return {"kind": self.scope_kind, "album": self.scope_album, "search": search}
+        return {"kind": self.scope_kind, "album": self.scope_album, "search": search,
+                "oldest_first": self.settings.sort_order == "oldest"}
 
     def refresh_library(self, keep_position: bool = True) -> None:
         """Reload the grid and the sidebar's counts and albums."""
@@ -695,6 +711,30 @@ class MainWindow(QMainWindow):
                 self.view.scroll_to_row(self.model.row_for_first_index(focus_index))
         self.settings.view_mode = mode
         self.settings_timer.start()
+
+    def set_sort_order(self, order: str) -> None:
+        """Newest or oldest first, everywhere."""
+        if order == self.settings.sort_order:
+            self._apply_sort_controls()
+            return
+        self.settings.sort_order = order
+        self._apply_sort_controls()
+        self.settings_timer.start()
+        # At the top, stay at the top (the start of the new order); further down, keep the photo in view.
+        at_top = self.view.verticalScrollBar().value() == 0
+        self.reload_library(keep_position=not at_top)
+        if self.viewer_active:
+            self.viewer.setFocus()
+
+    def toggle_sort_order(self) -> None:
+        self.set_sort_order("oldest" if self.settings.sort_order == "newest" else "newest")
+
+    def _apply_sort_controls(self) -> None:
+        oldest = self.settings.sort_order == "oldest"
+        self.sort_button.setText("↑  Oldest First" if oldest else "↓  Newest First")
+        self.sort_button.setToolTip("Showing oldest first. Click to show newest first." if oldest
+                                    else "Showing newest first. Click to show oldest first.")
+        self.sort_action_by_key[self.settings.sort_order].setChecked(True)
 
     def _focused_item_index(self) -> int | None:
         """Index into the full item list of what's at the top of the screen."""

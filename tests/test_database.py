@@ -46,6 +46,13 @@ class RepositoryTests(TempAppTestCase):
     def test_newest_first_with_undated_last(self):
         self.assertEqual(self.names(), ["sunset.jpg", "beach.mov", "IMG_0001.jpg", "IMG_0002.heic", "scan.png"])
 
+    def test_oldest_first_keeps_undated_last(self):
+        self.assertEqual(self.names(oldest_first=True),
+                         ["IMG_0002.heic", "IMG_0001.jpg", "beach.mov", "sunset.jpg", "scan.png"])
+
+    def test_oldest_first_within_an_album(self):
+        self.assertEqual(self.names(album="Trips", oldest_first=True), ["beach.mov", "sunset.jpg"])
+
     def test_kind_filters(self):
         self.assertEqual(self.names(kind="videos"), ["beach.mov"])
         self.assertNotIn("beach.mov", self.names(kind="photos"))
@@ -169,21 +176,23 @@ class SettingsTests(TempAppTestCase):
         loaded = store.load()
         self.assertEqual(loaded.library_folder, self.root)
         loaded.theme, loaded.zoom, loaded.view_mode, loaded.time_format = "dark", 200, "months", "12"
+        loaded.sort_order = "oldest"
         store.save(loaded)
         saved = json.loads(self.config_file.read_text())
         self.assertEqual((saved["legacy"], saved["theme"], saved["zoom"]), (42, "dark", 200))
-        self.assertEqual((store.load().view_mode, store.load().time_format), ("months", "12"))
+        self.assertEqual((store.load().view_mode, store.load().time_format, store.load().sort_order),
+                         ("months", "12", "oldest"))
 
     def test_invalid_values_fall_back_to_defaults(self):
         self.app_dir.mkdir()
         self.config_file.write_text(json.dumps({
             "library_folder": str(self.root / "missing"), "theme": "neon", "zoom": "big", "view_mode": "decades",
-            "time_format": "36",
+            "time_format": "36", "sort_order": "sideways",
         }))
         loaded = SettingsStore().load()
         self.assertEqual((loaded.library_folder, loaded.theme, loaded.view_mode), (None, "system", "all"))
         self.assertEqual(loaded.zoom, AppSettings().zoom)
-        self.assertEqual(loaded.time_format, "system")
+        self.assertEqual((loaded.time_format, loaded.sort_order), ("system", "newest"))
 
     def test_corrupt_config_is_ignored(self):
         self.app_dir.mkdir()

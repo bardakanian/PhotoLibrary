@@ -88,8 +88,12 @@ def _item_from_row(row: tuple) -> MediaItem:
 class MediaRepository:
     """Read and delete operations on the index. Safe to call from any thread."""
 
-    def query(self, folder: Path, kind: str = "all", album: str | None = None, search=None) -> list[MediaItem]:
-        """Items newest first; undated items last. `search` is a core.search.SearchFilter."""
+    def query(self, folder: Path, kind: str = "all", album: str | None = None, search=None,
+              oldest_first: bool = False) -> list[MediaItem]:
+        """Items newest first (or oldest first); undated items always last.
+
+        `search` is a core.search.SearchFilter.
+        """
         sql = f"SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ?"
         params: list[object] = [str(Path(folder).resolve())]
         if kind == "photos":
@@ -104,7 +108,11 @@ class MediaRepository:
             if clause:
                 sql += " AND " + clause
                 params.extend(search_params)
-        sql += " ORDER BY capture_ts DESC, id DESC"
+        if oldest_first:
+            # NULLs sort first in ascending order, so push undated items to the end explicitly.
+            sql += " ORDER BY capture_ts IS NULL, capture_ts ASC, id ASC"
+        else:
+            sql += " ORDER BY capture_ts DESC, id DESC"
         connection = open_database()
         try:
             return [_item_from_row(row) for row in connection.execute(sql, params)]

@@ -43,6 +43,11 @@ incremental indexer) come from the On This Day app.
   It reads only the index, so it opens instantly and never rescans. It refreshes after
   each scan. Esc returns to the grid.
 - **Empty states** for no folder, an empty library, an empty album, and no search results.
+- **Sort order:** the toolbar button (or View → Newest First / Oldest First) switches between
+  newest first and oldest first, so each month starts at its 1st. It applies everywhere:
+  albums, Photos/Videos, search, Years/Months and the viewer's ← / →. It's remembered
+  between launches. If you're at the top when you switch, you stay at the top; further
+  down, the photo you were looking at stays in view.
 - **Viewer**: double-click, Return or ⌘↓ opens an item full-window. ← and → step through
   the library. Esc (or ⌘↑) returns to the grid exactly where you left it.
   - **Photos** are shown with their EXIF rotation applied. Zoom with ⌘-scroll, pinch,
@@ -164,6 +169,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Rescan library | ⌘R |
 | Search by name or date | ⌘F (Esc clears it, Return jumps to the results) |
 | Years / Months / All Photos | ⌘1 / ⌘2 / ⌘3 |
+| Newest first / oldest first | Sort button in the toolbar, or the View menu |
 | Bigger / smaller thumbnails | ⌘= / ⌘− (or ⌘-scroll, or pinch) |
 | Show or hide the sidebar | ⌥⌘S |
 | Show or hide info | ⌘I |
