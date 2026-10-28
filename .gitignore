@@ -46,3 +46,6 @@ build/
 *.mpg
 *.3gp
 !assets/screenshots/*.png
+
+# Local Claude Code notes
+CLAUDE.md
