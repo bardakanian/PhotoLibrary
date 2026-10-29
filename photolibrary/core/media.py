@@ -36,6 +36,9 @@ _EXIF_DATE_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S")
 # EXIF orientations 5-8 rotate by 90 degrees, so width and height swap when displayed.
 _SWAPPED_ORIENTATIONS = {5, 6, 7, 8}
 _THUMB_BACKGROUND = (24, 26, 30)
+# A console program started from a windowless app (pythonw, the Windows launcher) gets a
+# console window of its own; this keeps ffmpeg from flashing one up for every video.
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def media_type_for_path(path: Path) -> str:
@@ -227,7 +230,7 @@ def read_video_metadata(path: Path) -> MediaMetadata:
     try:
         result = subprocess.run(
             [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
-            capture_output=True, text=True, timeout=10, check=False, errors="replace",
+            capture_output=True, text=True, timeout=10, check=False, errors="replace", **_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return MediaMetadata(None)
@@ -329,7 +332,7 @@ def _video_thumbnail(source: Path, target: Path, edge: int = THUMBNAIL_EDGE) -> 
             subprocess.run([
                 imageio_ffmpeg.get_ffmpeg_exe(), "-y", *seek, "-i", str(source),
                 "-frames:v", "1", "-vf", scale, "-q:v", "3", str(target),
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False, **_NO_WINDOW)
         except (OSError, subprocess.SubprocessError):
             continue
         if target.exists() and target.stat().st_size > 0:

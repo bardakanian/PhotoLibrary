@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QFile, QObject, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QMenu, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QSlider, QSplitter, QStackedWidget, QStyle, QVBoxLayout, QWidget,
@@ -75,6 +76,9 @@ class MainWindow(QMainWindow):
         self.warm_events = IndexEvents()
         self.warm_events.received.connect(self._handle_warm_event)
         self.warm_stop = threading.Event()
+        # Warming waits while a video plays: its checks are pure Python and make playback stutter.
+        self.warm_pending = False   # a run was requested and hasn't finished
+        self.video_playing = False
         # Folder watching: rescans automatically after files change on disk.
         self.watcher: LibraryWatcher | None = None
         self.pending_rescan = False
@@ -247,6 +251,7 @@ class MainWindow(QMainWindow):
         self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
         self.viewer.closed.connect(self.close_viewer)
         self.viewer.open_externally_requested.connect(self.open_in_default_app)
+        self.viewer.video.player.playbackStateChanged.connect(self._playback_state_changed)
         self.viewer.current_changed.connect(lambda item: self.info_panel.show_items([item]))
         self.viewer_info_button = QPushButton("ⓘ")
         self.viewer_info_button.setCheckable(True)
@@ -888,11 +893,17 @@ class MainWindow(QMainWindow):
     # Thumbnail warming -----------------------------------------------------
 
     def start_warming(self) -> None:
-        """Create every missing thumbnail in the background, newest first."""
+        """Create every missing thumbnail in the background, newest first.
+
+        While a video plays this only notes the request; it runs once playback pauses or stops.
+        """
         folder = self.root_folder
         if folder is None:
             return
         self.stop_warming()
+        self.warm_pending = True
+        if self.video_playing:
+            return
         self.warm_id += 1
         warm_id = self.warm_id
         stop = self.warm_stop = threading.Event()
@@ -905,18 +916,23 @@ class MainWindow(QMainWindow):
                 result = warm_thumbnails(
                     items, stop, lambda done, total: emit({"type": "progress", "id": warm_id, "done": done,
                                                            "total": total}))
-                # Then the large covers for the Years and Months tiles (one per year and month).
-                snapshot = build_snapshot(items)
-                covers = list({summary.cover.id: summary.cover
-                               for summary in snapshot.years + snapshot.months}.values())
-                warm_thumbnails(covers, stop, edge=COVER_EDGE)
+                if not stop.is_set():
+                    # Then the large covers for the Years and Months tiles (one per year and month).
+                    snapshot = build_snapshot(items)
+                    covers = list({summary.cover.id: summary.cover
+                                   for summary in snapshot.years + snapshot.months}.values())
+                    warm_thumbnails(covers, stop, edge=COVER_EDGE)
                 # Finally drop thumbnails of files that were deleted, edited or moved.
                 pruned = None
                 if not stop.is_set():
-                    pruned = prune_thumbnail_cache(media_module.THUMBNAIL_DIR, repository.cache_entries())
+                    pruned = prune_thumbnail_cache(media_module.THUMBNAIL_DIR, repository.cache_entries(),
+                                                   stop_event=stop)
                     if pruned.removed:
                         LOGGER.info("Removed %d stale thumbnails (%d bytes)", pruned.removed, pruned.freed_bytes)
-                emit({"type": "done", "id": warm_id, "result": result, "pruned": pruned})
+                if stop.is_set():
+                    emit({"type": "cancelled", "id": warm_id})
+                else:
+                    emit({"type": "done", "id": warm_id, "result": result, "pruned": pruned})
             except Exception as exc:  # reported on the UI thread
                 emit({"type": "error", "id": warm_id, "message": str(exc)})
 
@@ -925,8 +941,23 @@ class MainWindow(QMainWindow):
     def stop_warming(self) -> None:
         self.warm_stop.set()
 
+    def _playback_state_changed(self, state) -> None:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        if playing == self.video_playing:
+            return
+        self.video_playing = playing
+        if playing:
+            if self.warm_pending:
+                self.stop_warming()  # stays pending; resumes when playback stops
+                self.progress.hide()
+        elif self.warm_pending and not self.scanning:
+            self.start_warming()
+
     def _handle_warm_event(self, event: dict) -> None:
         if event.get("id") != self.warm_id or self.scanning:
+            return
+        if event["type"] == "cancelled":
+            self.progress.hide()  # still pending; whoever stopped it restarts it
             return
         if event["type"] == "progress":
             done, total = event["done"], event["total"]
@@ -935,6 +966,7 @@ class MainWindow(QMainWindow):
             self.progress.show()
             self.status.setText(f"Preparing thumbnails  ·  {done:,} of {total:,}  ·  scrolling gets faster as this finishes")
         elif event["type"] == "done":
+            self.warm_pending = False
             result: WarmResult = event["result"]
             self.progress.hide()
             pruned = event.get("pruned")
@@ -948,6 +980,7 @@ class MainWindow(QMainWindow):
             if notes:
                 self.status.setText(self.ready_text + "  ·  " + "  ·  ".join(notes))
         else:
+            self.warm_pending = False
             self.progress.hide()
             LOGGER.error("Thumbnail preparation failed: %s", event.get("message"))
 

@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from datetime import datetime
 
@@ -65,6 +66,14 @@ class CacheCleanupTests(TempAppTestCase):
         result = prune_thumbnail_cache(self.thumb_dir, [])
         self.assertEqual(result.removed, 0)
         self.assertTrue(self.orphan.exists())
+
+    def test_stopping_early_deletes_nothing(self):
+        """Stopped while still working out what to keep: a partial list must not delete good thumbnails."""
+        stop = threading.Event()
+        stop.set()
+        result = prune_thumbnail_cache(self.thumb_dir, [self.keep_entry], stop_event=stop)
+        self.assertEqual(result.removed, 0)
+        self.assertTrue(self.keep_grid.exists() and self.keep_cover.exists() and self.orphan.exists())
 
     def test_empty_bucket_folders_are_removed(self):
         bucket = self.orphan.parent

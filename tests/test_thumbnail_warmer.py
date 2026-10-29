@@ -33,6 +33,21 @@ class ThumbnailWarmerTests(TempAppTestCase):
         self.assertEqual(progress[-1], (13, 13))
         self.assertEqual(missing_thumbnails(self.items), [])  # the failure is remembered too
 
+    def test_missing_check_reads_the_cache_folders(self):
+        self.assertEqual(len(missing_thumbnails(self.items)), 13)
+        self.assertEqual(len(missing_thumbnails(self.items, edge=1)), 13)
+        first = self.items[0]
+        media.get_cached_thumbnail(first.path, first.media_type, first.file_size, first.modified_ns)
+        self.assertNotIn(first, missing_thumbnails(self.items))
+        self.assertEqual(len(missing_thumbnails(self.items)), 12)
+
+    def test_missing_check_stops_when_asked(self):
+        stop = threading.Event()
+        stop.set()
+        self.assertEqual(missing_thumbnails(self.items, stop_event=stop), [])
+        result = warm_thumbnails(self.items, stop)
+        self.assertEqual(result.created, 0)
+
     def test_second_run_has_nothing_to_do(self):
         warm_thumbnails(self.items, threading.Event(), workers=2)
         with patch.object(thumbnail_warmer, "get_cached_thumbnail") as create:

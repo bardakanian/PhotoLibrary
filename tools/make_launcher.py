@@ -1,14 +1,21 @@
-"""Build a small macOS launcher app ("Photo Library.app") that runs this project.
+"""Build a small launcher that runs this project like an installed app.
 
+macOS ("Photo Library.app"):
     python tools/make_launcher.py              # builds dist/Photo Library.app and installs it in ~/Applications
     python tools/make_launcher.py --no-install # only builds dist/Photo Library.app
 
+Windows ("Photo Library" shortcut):
+    python tools/make_launcher.py              # builds dist/Photo Library.lnk, adds it to the Start menu and Desktop
+    python tools/make_launcher.py --no-install # only builds dist/Photo Library.lnk
+
 The launcher contains no code of its own: it runs app.py with the project's .venv, so it
 always starts the latest code. Re-run this script if you move the project folder.
-Output and errors from the app go to ~/.photo_library/launcher.log.
+On macOS, output and errors from the app go to ~/.photo_library/launcher.log; on Windows
+the app runs without a console and logs to ~/.photo_library/photo_library.log.
 """
 
 import argparse
+import os
 import plistlib
 import shlex
 import shutil
@@ -24,6 +31,9 @@ APP_NAME = "Photo Library"
 BUNDLE_ID = "local.photolibrary.launcher"
 EXECUTABLE = "launcher"
 ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
+# app.py looks for this file to set the window and taskbar icon.
+WINDOWS_ICON = PROJECT / "dist" / f"{APP_NAME}.ico"
+ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 
 def draw_icon(size: int = 1024) -> Image.Image:
@@ -175,12 +185,79 @@ def install(bundle: Path) -> Path:
     return target
 
 
+# Windows ------------------------------------------------------------------
+
+# Shortcuts are written and read through the WScript.Shell COM object, so no extra packages
+# are needed. Values travel in environment variables to avoid any quoting problems.
+_WRITE_SHORTCUT = """
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:PL_LINK)
+$s.TargetPath = $env:PL_TARGET
+$s.Arguments = $env:PL_ARGS
+$s.WorkingDirectory = $env:PL_DIR
+$s.IconLocation = $env:PL_ICON
+$s.Description = $env:PL_DESCRIPTION
+$s.Save()
+"""
+_READ_DESCRIPTION = "(New-Object -ComObject WScript.Shell).CreateShortcut($env:PL_LINK).Description"
+
+
+def _powershell(script: str, **values: str) -> str:
+    env = dict(os.environ, **{f"PL_{key.upper()}": value for key, value in values.items()})
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                            env=env, capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def build_ico(target: Path) -> None:
+    master = draw_icon(1024)
+    # Pillow resizes from the largest image for each listed size.
+    master.resize((256, 256), Image.Resampling.LANCZOS).save(target, sizes=[(s, s) for s in ICO_SIZES])
+
+
+def build_windows(output_dir: Path) -> Path:
+    python = PROJECT / ".venv" / "Scripts" / "pythonw.exe"  # pythonw: no console window
+    app = PROJECT / "app.py"
+    if not python.exists():
+        sys.exit(f"No virtual environment at {python}. Create it first (see README).")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    build_ico(WINDOWS_ICON)
+    link = output_dir / f"{APP_NAME}.lnk"
+    link.unlink(missing_ok=True)
+    _powershell(_WRITE_SHORTCUT, link=str(link), target=str(python), args=f'"{app}"', dir=str(PROJECT),
+                icon=f"{WINDOWS_ICON},0", description=BUNDLE_ID)
+    return link
+
+
+def install_windows(link: Path) -> list[Path]:
+    """Copy into the Start menu and onto the Desktop, replacing only earlier copies of this launcher."""
+    start_menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    desktop = Path(_powershell("[Environment]::GetFolderPath('Desktop')"))  # follows OneDrive redirection
+    installed = []
+    for folder in (start_menu, desktop):
+        target = folder / link.name
+        if target.exists() and _powershell(_READ_DESCRIPTION, link=str(target)) != BUNDLE_ID:
+            print(f"{target} exists and isn't this launcher; not replacing it.")
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(link, target)
+        installed.append(target)
+    return installed
+
+
 def main() -> None:
-    if sys.platform != "darwin":
-        sys.exit("The launcher is for macOS. On other systems, run: python app.py")
+    if sys.platform not in ("darwin", "win32"):
+        sys.exit("The launcher is for macOS and Windows. On other systems, run: python app.py")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--no-install", action="store_true", help="don't copy the app into ~/Applications")
+    parser.add_argument("--no-install", action="store_true",
+                        help="only build in dist/ (don't install into ~/Applications or the Start menu and Desktop)")
     args = parser.parse_args()
+    if sys.platform == "win32":
+        link = build_windows(PROJECT / "dist")
+        print(f"Built {link}")
+        if not args.no_install:
+            for target in install_windows(link):
+                print(f"Installed {target}")
+        return
     bundle = build(PROJECT / "dist")
     print(f"Built {bundle}")
     if not args.no_install:

@@ -6,6 +6,7 @@ cache only ever grows.
 """
 
 import hashlib
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,24 +30,36 @@ def _digest(path: str, file_size: int, modified_ns: int, edge: int) -> str:
     return hashlib.sha256(f"{Path(path)}|{file_size}|{modified_ns}|{edge}".encode()).hexdigest()
 
 
-def expected_names(entries: Iterable[tuple[str, int, int]]) -> set[str]:
-    """Thumbnail hashes (grid and cover) for (file_path, file_size, modified_ns) entries."""
-    return {_digest(path, size, modified, edge)
-            for path, size, modified in entries for edge in (THUMBNAIL_EDGE, COVER_EDGE)}
+def expected_names(entries: Iterable[tuple[str, int, int]],
+                   stop_event: threading.Event | None = None) -> set[str] | None:
+    """Thumbnail hashes (grid and cover) for (file_path, file_size, modified_ns) entries.
+
+    None if `stop_event` was set before every entry was hashed: a partial set must never be
+    used to decide what to delete.
+    """
+    names = set()
+    for index, (path, size, modified) in enumerate(entries):
+        if index % 1000 == 0 and stop_event is not None and stop_event.is_set():
+            return None
+        names.update(_digest(path, size, modified, edge) for edge in (THUMBNAIL_EDGE, COVER_EDGE))
+    return names
 
 
 def prune_thumbnail_cache(thumbnail_dir: Path, entries: Iterable[tuple[str, int, int]],
-                          now: float | None = None) -> PruneResult:
+                          now: float | None = None, stop_event: threading.Event | None = None) -> PruneResult:
     """Delete cache files not belonging to `entries` (every row in the index, all folders).
 
     Refuses to run with no entries, so an empty or unreadable index never wipes the cache.
+    If `stop_event` is set, stops between cache folders (or before deleting anything).
     """
-    keep = expected_names(entries)
+    keep = expected_names(entries, stop_event)
     if not keep or not thumbnail_dir.is_dir():
         return PruneResult(0, 0, 0)
     now = time.time() if now is None else now
     kept = removed = freed = 0
     for bucket in thumbnail_dir.iterdir():
+        if stop_event is not None and stop_event.is_set():
+            break
         if not bucket.is_dir():
             continue
         for cached in bucket.iterdir():

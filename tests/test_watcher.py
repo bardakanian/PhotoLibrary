@@ -71,6 +71,22 @@ class LibraryWatcherTests(unittest.TestCase):
         os.rename(photo, self.folder / "2026-2" / "a.jpg")
         self.assertTrue(self.changes.wait(8), "move not reported")
 
+    def test_reading_a_file_is_not_a_change(self):
+        """Windows reports access-time updates as "modified"; reading must not trigger a rescan."""
+        photo = self.folder / "2026-1" / "old.jpg"
+        Image.new("RGB", (8, 8)).save(photo)
+        long_ago = time.time() - 86400
+        os.utime(photo, (long_ago, long_ago))  # an older photo, as in a real library
+        self.assertTrue(self.changes.wait(8))
+        time.sleep(0.6)
+        self.changes.clear()
+        os.utime(photo, (time.time(), long_ago))  # what reading it does: new access time only
+        photo.read_bytes()
+        self.assertFalse(self.changes.wait(2.5), "a read was reported as a change")
+        with open(photo, "ab") as handle:  # a real edit is still noticed
+            handle.write(b"\0")
+        self.assertTrue(self.changes.wait(8), "edit not reported")
+
     def test_unrelated_and_hidden_files_are_ignored(self):
         (self.folder / "notes.txt").write_text("hello")
         (self.folder / ".DS_Store").write_bytes(b"x")

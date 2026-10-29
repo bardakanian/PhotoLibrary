@@ -31,6 +31,8 @@ TRACKED_FILES = 200      # how many changed files are checked for "still being w
 # FSEvents replays a few events from just before watching began; the scan that runs at
 # start-up covers those, so they are ignored.
 STARTUP_GRACE_SECONDS = 1.0
+# A "modified" file whose contents were last written longer ago than this didn't really change.
+RECENT_WRITE_SECONDS = 120.0
 
 
 class ChangeBatcher:
@@ -79,6 +81,17 @@ def _relevant(path: str, is_directory: bool) -> bool:
     return is_directory or os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS
 
 
+def _written_recently(path: str) -> bool:
+    """Windows reports "modified" when only a file's last-access time or attributes change, and
+    simply reading a file (playing a video, making a thumbnail) updates its access time. Only a
+    recent modification time means the contents changed; otherwise every first read of a file
+    would start a rescan of the whole library."""
+    try:
+        return os.stat(path).st_mtime >= time.time() - RECENT_WRITE_SECONDS
+    except OSError:
+        return True  # gone or unreadable: let the scan sort it out
+
+
 def _size(path: str) -> int | None:
     try:
         return os.stat(path).st_size
@@ -96,6 +109,8 @@ class _Handler(FileSystemEventHandler):
             return  # reads, not changes
         if event.is_directory and event.event_type == "modified":
             return  # FSEvents reports this for the parent of every changed file
+        if event.event_type == "modified" and not _written_recently(os.fsdecode(event.src_path)):
+            return  # only read (access time) or attributes changed
         paths = [os.fsdecode(event.src_path)]
         if getattr(event, "dest_path", ""):
             paths.append(os.fsdecode(event.dest_path))

@@ -12,9 +12,10 @@ incremental indexer) come from the On This Day app.
 
 - **Library folder** chosen once and remembered. It's indexed in the background with a
   progress bar. Every launch, and **Rescan**, picks up added, changed and deleted files.
-- **Updates by itself:** the folder is watched (macOS FSEvents), so photos you add, move
-  between folders or delete show up a few seconds later, with no ⌘R needed. A big copy is
-  handled as one update once it finishes. You can turn this off in Settings.
+- **Updates by itself:** the folder is watched (FSEvents on macOS, ReadDirectoryChangesW on
+  Windows), so photos you add, move between folders or delete show up a few seconds later,
+  with no ⌘R needed. A big copy is handled as one update once it finishes. Just viewing or
+  playing a file never counts as a change. You can turn this off in Settings.
 - **Virtualized grid** that stays smooth with 50,000+ items. It has month section
   headers with a sticky header at the top, and a thumbnail size slider.
 - **Years / Months / All Photos** views. Click a year to see its months, and a month to
@@ -127,7 +128,8 @@ QT_LOGGING_RULES="qt.multimedia.*=true" python app.py
 ## Requirements
 
 - Python 3.10 or newer (developed on 3.14)
-- macOS is the primary target; Windows and Linux should work
+- macOS is the primary target. Windows 11 is tested too, including a Start menu launcher;
+  Linux should work
 - Dependencies in `requirements.txt`:
   - PySide6
   - Pillow
@@ -143,6 +145,15 @@ previews or automatic updates are then limited.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+On Windows (PowerShell):
+
+```bash
+py -m venv .venv
+.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python app.py
 ```
@@ -163,6 +174,22 @@ always runs your latest code. Notes:
 - Re-run the script if you move the project folder or recreate `.venv`. If the project
   can't be found, the launcher shows an alert.
 - Output and errors go to `~/.photo_library/launcher.log`.
+
+### Launch it like an app (Windows)
+
+```bash
+.venv\Scripts\python tools\make_launcher.py
+```
+
+This creates a **Photo Library** shortcut with its own icon in `dist\` and copies it into
+the Start menu and onto the Desktop. Search for it from Start, or right-click it there to
+pin it to Start or the taskbar. Like the macOS launcher, it runs this project's `app.py`
+with `.venv\Scripts\pythonw.exe`, so there's no console window and it always runs your
+latest code. Notes:
+
+- Re-run the script if you move the project folder or recreate `.venv`.
+- `--no-install` only builds `dist\Photo Library.lnk`.
+- Errors go to `~/.photo_library/photo_library.log`.
 
 To try it without your own photos, generate a synthetic library first:
 
@@ -221,7 +248,8 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
     missing thumbnail in the background, newest first, using half the CPU cores. The
     status bar shows its progress. Once it finishes, scrolling never waits on an original.
     In a test with 150 ms per original, blank cells while scrolling dropped from 78% to 0%.
-    It's a one-time cost: rescans only prepare new or changed files.
+    It's a one-time cost: rescans only prepare new or changed files. It pauses while a
+    video plays and resumes afterwards, so playback stays smooth.
   - **Loaded around you.** `ui/thumbnails.py` decodes cached thumbnails on worker threads
     at about the cell's size and keeps them in an in-memory LRU of about 480 MB. While you
     scroll, visible cells load first and work for cells that scrolled away is dropped. When
@@ -235,7 +263,16 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
     preparation, `core/cache_cleanup.py` deletes thumbnails no indexed file needs, so the
     cache doesn't grow forever.
 - **The UI thread never reads files or the database.** Queries, grouping, settings
-  writes and thumbnail decoding run in the background (`ui/tasks.py`).
+  writes and thumbnail decoding run in the background (`ui/tasks.py`). Python hands the
+  GIL around every 1 ms instead of 5 ms, so that pure-Python background work (scans,
+  thumbnail checks) never makes the UI or video playback wait.
+- **Freezes are logged.** If the UI thread stops responding for more than 80 ms,
+  `ui/freeze_monitor.py` writes what every thread was doing to the log, then how long the
+  freeze lasted.
+- **Only real changes trigger a rescan.** Windows reports a file as modified when only its
+  last-access time changes, which happens the first time it's read (playing a video,
+  making a thumbnail). The watcher ignores "modified" files whose contents weren't
+  written recently.
 
 ## Project structure
 
@@ -252,7 +289,7 @@ photolibrary/
 │   ├── search.py          Search box parsing (filename and dates)
 │   ├── trash.py           Move to Trash plus index and thumbnail cleanup
 │   ├── live_photos.py     Pairs Live Photo stills with their motion clips
-│   ├── watcher.py         Folder watching (FSEvents via watchdog) with change batching
+│   ├── watcher.py         Folder watching (watchdog: FSEvents, ReadDirectoryChangesW) with change batching
 │   ├── thumbnail_warmer.py Background creation of missing thumbnails and covers
 │   ├── cache_cleanup.py   Removes thumbnails no indexed file needs
 │   ├── cache.py           Cost-bounded LRU cache
@@ -267,13 +304,14 @@ photolibrary/
     ├── grid_model.py      Qt model over a library snapshot
     ├── thumbnails.py      Background thumbnail loader and pixmap cache
     ├── tasks.py           run_async helper for background work
+    ├── freeze_monitor.py  Logs what every thread was doing when the UI stalls
     ├── viewer_images.py   Background full-size photo decoding for the viewer
     ├── pages/             Grid page, full-window viewer and Library Insights
     ├── theme/             Colours, typography, metrics, stylesheet
     └── widgets/           Sidebar, info panel, image canvas, video player, empty state, search box
 tests/                     unittest suite: core modules, plus tests/ui (the real window, headless)
 tools/make_demo_library.py Synthetic library generator
-tools/make_launcher.py     Builds the macOS launcher app
+tools/make_launcher.py     Builds the macOS launcher app or the Windows shortcut
 tools/make_screenshots.py  Regenerates the README screenshots
 assets/screenshots/        README screenshots (synthetic demo library)
 ```
@@ -286,14 +324,18 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 146 tests (about a minute). It includes headless UI tests that drive the
-real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos
-and folder watching) on a generated library. To skip the UI tests while iterating (about
-15 seconds):
+The suite has 157 tests (one to two minutes). It includes headless UI tests that drive the
+real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
+folder watching, theme changes, the freeze monitor and pausing thumbnail work during
+playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):
 
 ```bash
 SKIP_UI_TESTS=1 python -m unittest
 ```
+
+If the app or video playback pauses, look for "UI thread not responding" in
+`~/.photo_library/photo_library.log`: each entry shows what every thread was doing at that
+moment.
 
 App data (config, the SQLite index, thumbnails and the log) lives in
 `~/.photo_library/`. Set `PHOTO_LIBRARY_HOME` to use a different folder, for example

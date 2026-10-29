@@ -13,6 +13,7 @@ class ThemeManager(QObject):
         super().__init__(app)
         self.app = app
         self.preference = preference
+        self._applied: str | None = None  # "light" or "dark" currently in the stylesheet
         app.installEventFilter(self)
         self.apply(preference)
 
@@ -31,11 +32,17 @@ class ThemeManager(QObject):
         if preference not in {"system", "light", "dark"}:
             preference = "system"
         self.preference = preference
+        self._applied = self.resolved
         self.app.setStyleSheet(build_stylesheet(self.colors))
         self.changed.emit(preference)
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.ApplicationPaletteChange and self.preference == "system":
+        # Windows reports palette changes for many reasons (accent colour, Night light, display
+        # changes), and the event reaches this filter once per widget. Re-applying the stylesheet
+        # re-styles the whole window (most of a second), so do it only when light/dark flipped.
+        if (event.type() == QEvent.Type.ApplicationPaletteChange and watched is self.app
+                and self.preference == "system" and self.resolved != self._applied):
+            self._applied = self.resolved
             self.app.setStyleSheet(build_stylesheet(self.colors))
             self.changed.emit(self.preference)
         return super().eventFilter(watched, event)
