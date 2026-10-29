@@ -59,8 +59,13 @@ def _count_label(items: Sequence[MediaItem]) -> str:
 
 
 def _cover(items: Sequence[MediaItem]) -> MediaItem:
-    # Photos make better covers than video stills; take the first one if there is any.
-    return next((item for item in items if not item.is_video), items[0])
+    """The newest photo in the group (video stills make poorer covers), whatever the sort order.
+
+    Keeping covers independent of the sort order means their large cover thumbnails are
+    prepared once and stay valid.
+    """
+    photos = [item for item in items if not item.is_video] or list(items)
+    return max(photos, key=lambda item: (item.captured_at is not None, item.captured_at or 0, item.id))
 
 
 def summarize(items: Sequence[MediaItem], by: str) -> list[Summary]:

@@ -14,8 +14,13 @@ from ..core.database import MediaRepository
 from ..core.grouping import LibrarySnapshot, build_snapshot
 from ..core.indexer import MediaIndexer
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
+from ..core import media as media_module
+from ..core.cache_cleanup import prune_thumbnail_cache
+from ..core.constants import COVER_EDGE
 from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
+from ..core.watcher import LibraryWatcher
+from ..core.formatting import format_size
 from ..core.search import SearchFilter, parse_query
 from ..core.settings import MAX_ZOOM, MIN_ZOOM, SettingsStore
 from .dialogs import PreferencesDialog
@@ -70,6 +75,15 @@ class MainWindow(QMainWindow):
         self.warm_events = IndexEvents()
         self.warm_events.received.connect(self._handle_warm_event)
         self.warm_stop = threading.Event()
+        # Folder watching: rescans automatically after files change on disk.
+        self.watcher: LibraryWatcher | None = None
+        self.pending_rescan = False
+        self.watch_events = IndexEvents()
+        self.watch_events.received.connect(self._folder_changed)
+        self.watch_retry = QTimer(self)
+        self.watch_retry.setSingleShot(True)
+        self.watch_retry.setInterval(30_000)
+        self.watch_retry.timeout.connect(self.start_watching)
         self.warm_id = 0
         self.ready_text = "Ready"
         # While a scan is adding items, refresh the grid at most every few seconds.
@@ -363,8 +377,10 @@ class MainWindow(QMainWindow):
         self.view.setFocus()
         if self.root_folder:
             self.refresh_library()
-            # Every launch runs an incremental scan to pick up files changed outside the app.
+            # Every launch runs an incremental scan to pick up files changed outside the app,
+            # then the folder is watched so later changes show up by themselves.
             self.start_indexing()
+            self.start_watching()
         else:
             self._update_empty_state()
         missing = []
@@ -403,6 +419,7 @@ class MainWindow(QMainWindow):
         if self.insights_active:
             self.load_insights()
         self.start_indexing()
+        self.start_watching()
 
     def _empty_action(self, action: str) -> None:
         if action == "choose":
@@ -463,6 +480,10 @@ class MainWindow(QMainWindow):
             if self.pending_index_start:
                 self.status.setText("Starting requested scan…")
                 return
+            if self.pending_rescan and event_type == "scan_complete":
+                # Files changed while this scan ran; look again so nothing is missed.
+                self.pending_rescan = False
+                QTimer.singleShot(0, self.start_indexing)
             self._update_folder_label()
             if event_type == "scan_complete":
                 parts = [f"{event['total_indexed']:,} items"]
@@ -825,6 +846,45 @@ class MainWindow(QMainWindow):
 
         run_async(self.io_pool, command, done)
 
+    # Folder watching -------------------------------------------------------
+
+    def start_watching(self) -> None:
+        """Watch the library folder for changes (if enabled), replacing any earlier watcher."""
+        self.stop_watching()
+        folder = self.root_folder
+        if folder is None or not self.settings.watch_folder:
+            return
+        emit = self.watch_events.received.emit
+        watcher = LibraryWatcher(folder, lambda: emit(None))
+        if watcher.start():
+            self.watcher = watcher
+        else:
+            # Usually an unplugged drive; try again in a while.
+            self.watch_retry.start()
+
+    def stop_watching(self) -> None:
+        self.watch_retry.stop()
+        if self.watcher is not None:
+            self.watcher.stop()
+            self.watcher = None
+
+    def _folder_changed(self, _payload=None) -> None:
+        """Files changed in the library folder: run the (incremental) scan once things settle."""
+        if self.root_folder is None:
+            return
+        if self.scanning:
+            self.pending_rescan = True
+            return
+        self.status.setText("Changes found in the library folder  ·  updating…")
+        self.start_indexing()
+
+    def _move_to_trash(self, path: Path) -> bool:
+        """Runs on a worker thread. The watcher is told first, so the app's own change isn't a "new" change."""
+        watcher = self.watcher
+        if watcher is not None:
+            watcher.ignore([path])
+        return QFile.moveToTrash(str(path))
+
     # Thumbnail warming -----------------------------------------------------
 
     def start_warming(self) -> None:
@@ -845,7 +905,18 @@ class MainWindow(QMainWindow):
                 result = warm_thumbnails(
                     items, stop, lambda done, total: emit({"type": "progress", "id": warm_id, "done": done,
                                                            "total": total}))
-                emit({"type": "done", "id": warm_id, "result": result})
+                # Then the large covers for the Years and Months tiles (one per year and month).
+                snapshot = build_snapshot(items)
+                covers = list({summary.cover.id: summary.cover
+                               for summary in snapshot.years + snapshot.months}.values())
+                warm_thumbnails(covers, stop, edge=COVER_EDGE)
+                # Finally drop thumbnails of files that were deleted, edited or moved.
+                pruned = None
+                if not stop.is_set():
+                    pruned = prune_thumbnail_cache(media_module.THUMBNAIL_DIR, repository.cache_entries())
+                    if pruned.removed:
+                        LOGGER.info("Removed %d stale thumbnails (%d bytes)", pruned.removed, pruned.freed_bytes)
+                emit({"type": "done", "id": warm_id, "result": result, "pruned": pruned})
             except Exception as exc:  # reported on the UI thread
                 emit({"type": "error", "id": warm_id, "message": str(exc)})
 
@@ -866,9 +937,16 @@ class MainWindow(QMainWindow):
         elif event["type"] == "done":
             result: WarmResult = event["result"]
             self.progress.hide()
+            pruned = event.get("pruned")
+            notes = []
             if result.missing and not result.cancelled:
-                note = f"  ·  {result.failed:,} without a preview" if result.failed else ""
-                self.status.setText(f"{self.ready_text}  ·  all thumbnails ready{note}")
+                notes.append("all thumbnails ready")
+                if result.failed:
+                    notes.append(f"{result.failed:,} without a preview")
+            if pruned and pruned.removed:
+                notes.append(f"freed {format_size(pruned.freed_bytes)} of old thumbnails")
+            if notes:
+                self.status.setText(self.ready_text + "  ·  " + "  ·  ".join(notes))
         else:
             self.progress.hide()
             LOGGER.error("Thumbnail preparation failed: %s", event.get("message"))
@@ -1026,8 +1104,13 @@ class MainWindow(QMainWindow):
                 parts.append(f"{videos:,} video{'s' if videos != 1 else ''}")
             dialog.setWindowTitle("Move items to Trash?")
             dialog.setText(f"Move {len(items):,} items ({' and '.join(parts)}) to the Trash?")
-        dialog.setInformativeText("The original files are moved out of your library folder. "
-                                  "You can restore them from the Trash.")
+        live = sum(1 for item in items if item.is_live)
+        live_note = ""
+        if live:
+            live_note = (" Its Live Photo video is moved too." if len(items) == 1 else
+                         f" The videos of {live:,} Live Photo{'s' if live != 1 else ''} are moved too.")
+        dialog.setInformativeText("The original files are moved out of your library folder."
+                                  f"{live_note} You can restore them from the Trash.")
         move_button = dialog.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
         dialog.addButton(QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
@@ -1044,7 +1127,7 @@ class MainWindow(QMainWindow):
         repository = self.repository
         run_async(
             self.io_pool,
-            lambda: trash_items(folder, items, lambda path: QFile.moveToTrash(str(path)), repository),
+            lambda: trash_items(folder, items, lambda path: self._move_to_trash(path), repository),
             lambda result: self._trash_finished(result, first_row),
             self._trash_failed,
         )
@@ -1106,10 +1189,13 @@ class MainWindow(QMainWindow):
                   lambda error: LOGGER.error("Could not save settings", exc_info=error))
 
     def show_preferences(self) -> None:
-        dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self)
+        dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self)
         if dialog.exec():
             self.settings.theme = dialog.selected_theme
             self.settings.time_format = dialog.selected_time_format
+            if dialog.selected_watch_folder != self.settings.watch_folder:
+                self.settings.watch_folder = dialog.selected_watch_folder
+                self.start_watching()
             self.theme.apply(self.settings.theme)
             self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
             self.info_panel.set_hour12(uses_12_hour(self.settings.time_format))
@@ -1119,6 +1205,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.stop_watching()
         self.stop_event.set()
         self.stop_warming()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()

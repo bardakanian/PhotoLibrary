@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
@@ -69,6 +72,10 @@ class ViewerPage(QWidget):
         self.fit_button = self._button("Fit", "Zoom to fit (⌘0)")
         self.fit_button.clicked.connect(lambda: self.canvas.toggle_actual_size())
         bar.addWidget(self.fit_button)
+        self.live_button = self._button("◉ LIVE", "Play the Live Photo (L)")
+        self.live_button.clicked.connect(self.play_live)
+        self.live_button.hide()
+        bar.addWidget(self.live_button)
         self.position_label = QLabel()
         self.position_label.setProperty("muted", True)
         self.position_label.setMinimumWidth(90)
@@ -101,6 +108,9 @@ class ViewerPage(QWidget):
         shortcut("Shift+Left", lambda: self.video.seek_by(-5000))
         shortcut("Shift+Right", lambda: self.video.seek_by(5000))
         shortcut("M", self.video.toggle_mute)
+        shortcut("L", self.play_live)
+        self._live_playing = False
+        self.video.player.mediaStatusChanged.connect(self._live_status)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     @staticmethod
@@ -189,6 +199,8 @@ class ViewerPage(QWidget):
             return
         self._update_labels(item)
         self._full_requested.clear()
+        self._live_playing = False
+        self.live_button.setVisible(item.is_live)
         self.current_changed.emit(item)
         if item.is_video:
             self.zoom_label.clear()
@@ -260,6 +272,24 @@ class ViewerPage(QWidget):
         self.zoom_label.setText("Fit" if self.canvas.is_fitted else f"{round(scale * 100)}%")
         self.fit_button.setText("100%" if self.canvas.is_fitted else "Fit")
         self.fit_button.setToolTip("Actual size (⌘0)" if self.canvas.is_fitted else "Zoom to fit (⌘0)")
+
+    def play_live(self) -> None:
+        """Play a Live Photo's motion clip over the photo, then return to the still."""
+        item = self.current_item
+        if item is None or not item.is_live:
+            return
+        self._live_playing = True
+        self.content.setCurrentWidget(self.video)
+        self.video.load(Path(item.live_video))
+
+    def _live_status(self, status) -> None:
+        if self._live_playing and status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._end_live()
+
+    def _end_live(self) -> None:
+        self._live_playing = False
+        self.video.stop()
+        self.content.setCurrentWidget(self.canvas)
 
     def _space(self) -> None:
         item = self.current_item

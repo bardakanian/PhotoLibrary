@@ -13,6 +13,7 @@ class MediaMetadata:
     height: int | None = None
     camera: str | None = None
     duration: float | None = None
+    live_motion: bool = False  # a video carrying Apple's Live Photo metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,13 @@ class MediaItem:
     height: int | None = None
     camera: str | None = None
     duration: float | None = None
+
+    live_video_id: int | None = None   # for a Live Photo: its motion clip
+    live_video: str | None = None
+
+    @property
+    def is_live(self) -> bool:
+        return self.live_video is not None
 
     @property
     def path(self) -> Path:
@@ -87,3 +95,4 @@ class AnalyticsResult:
     top_camera: str | None = None
     top_camera_count: int = 0
     camera_count: int = 0
+    live_photos: int = 0

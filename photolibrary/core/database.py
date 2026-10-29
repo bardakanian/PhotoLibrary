@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -60,9 +61,17 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             camera TEXT,
             duration REAL,
             metadata_version INTEGER NOT NULL DEFAULT 0,
+            live_motion INTEGER NOT NULL DEFAULT 0,
+            live_pair_id INTEGER,
             UNIQUE (folder_root, file_path)
         )
     """)
+    # Columns added after the first release; older databases get them here.
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(media)")}
+    if "live_motion" not in columns:
+        connection.execute("ALTER TABLE media ADD COLUMN live_motion INTEGER NOT NULL DEFAULT 0")
+    if "live_pair_id" not in columns:
+        connection.execute("ALTER TABLE media ADD COLUMN live_pair_id INTEGER")
     # SQLite sorts NULL lowest, so DESC order puts undated items last using this index.
     connection.execute("""
         CREATE INDEX IF NOT EXISTS idx_media_order
@@ -71,6 +80,24 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_media_album ON media (folder_root, album)")
     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     connection.commit()
+
+
+# A Live Photo's motion clip is shown as part of its photo, never as a video of its own.
+VISIBLE = "NOT (media_type = 'video' AND live_pair_id IS NOT NULL)"
+
+
+def _attach_live_videos(connection: sqlite3.Connection, folder_root: str,
+                        items: list[MediaItem]) -> list[MediaItem]:
+    companions = {
+        photo_id: (video_id, path) for photo_id, video_id, path in connection.execute("""
+            SELECT live_pair_id, id, file_path FROM media
+            WHERE folder_root = ? AND media_type = 'video' AND live_pair_id IS NOT NULL
+        """, (folder_root,))
+    }
+    if not companions:
+        return items
+    return [replace(item, live_video_id=companions[item.id][0], live_video=companions[item.id][1])
+            if item.id in companions else item for item in items]
 
 
 def _item_from_row(row: tuple) -> MediaItem:
@@ -94,8 +121,9 @@ class MediaRepository:
 
         `search` is a core.search.SearchFilter.
         """
-        sql = f"SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ?"
-        params: list[object] = [str(Path(folder).resolve())]
+        folder_root = str(Path(folder).resolve())
+        sql = f"SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ? AND {VISIBLE}"
+        params: list[object] = [folder_root]
         if kind == "photos":
             sql += " AND media_type = 'image'"
         elif kind == "videos":
@@ -115,15 +143,27 @@ class MediaRepository:
             sql += " ORDER BY capture_ts DESC, id DESC"
         connection = open_database()
         try:
-            return [_item_from_row(row) for row in connection.execute(sql, params)]
+            items = [_item_from_row(row) for row in connection.execute(sql, params)]
+            return _attach_live_videos(connection, folder_root, items)
         finally:
             connection.close()
 
     def get(self, item_id: int) -> MediaItem | None:
         connection = open_database()
         try:
-            row = connection.execute(f"SELECT {_ITEM_COLUMNS} FROM media WHERE id = ?", (item_id,)).fetchone()
-            return _item_from_row(row) if row else None
+            row = connection.execute(f"SELECT {_ITEM_COLUMNS}, folder_root FROM media WHERE id = ?",
+                                     (item_id,)).fetchone()
+            if not row:
+                return None
+            return _attach_live_videos(connection, row[-1], [_item_from_row(row[:-1])])[0]
+        finally:
+            connection.close()
+
+    def cache_entries(self) -> list[tuple[str, int, int]]:
+        """(file_path, file_size, modified_ns) for every indexed file in every folder."""
+        connection = open_database()
+        try:
+            return connection.execute("SELECT file_path, file_size, modified_ns FROM media").fetchall()
         finally:
             connection.close()
 
@@ -131,8 +171,8 @@ class MediaRepository:
         connection = open_database()
         try:
             total, videos = connection.execute("""
-                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0) FROM media WHERE folder_root = ?
-            """, (str(Path(folder).resolve()),)).fetchone()
+                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0) FROM media WHERE folder_root = ? AND {VISIBLE}
+            """.format(VISIBLE=VISIBLE), (str(Path(folder).resolve()),)).fetchone()
             return {"all": int(total), "photos": int(total - videos), "videos": int(videos)}
         finally:
             connection.close()
@@ -142,15 +182,15 @@ class MediaRepository:
         folder_root = str(Path(folder).resolve())
         connection = open_database()
         try:
-            rows = connection.execute("""
+            rows = connection.execute(f"""
                 SELECT album, COUNT(*) FROM media
-                WHERE folder_root = ? AND album != ''
+                WHERE folder_root = ? AND album != '' AND {VISIBLE}
                 GROUP BY album ORDER BY album COLLATE NOCASE
             """, (folder_root,)).fetchall()
             albums = []
             for name, count in rows:
                 cover = connection.execute(f"""
-                    SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ? AND album = ?
+                    SELECT {_ITEM_COLUMNS} FROM media WHERE folder_root = ? AND album = ? AND {VISIBLE}
                     ORDER BY capture_ts DESC, id DESC LIMIT 1
                 """, (folder_root, name)).fetchone()
                 albums.append(Album(name, int(count), _item_from_row(cover) if cover else None))
@@ -189,45 +229,49 @@ class MediaRepository:
         folder_root = str(Path(folder).resolve())
         connection = open_database()
         try:
-            combined, videos, total_bytes, undated, oldest, newest = connection.execute("""
-                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0), COALESCE(SUM(file_size), 0),
-                       COALESCE(SUM(capture_ts IS NULL), 0), MIN(capture_ts), MAX(capture_ts)
-                FROM media WHERE folder_root = ?
+            combined, videos, undated, oldest, newest, live = connection.execute(f"""
+                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0),
+                       COALESCE(SUM(capture_ts IS NULL), 0), MIN(capture_ts), MAX(capture_ts),
+                       COALESCE(SUM(media_type = 'image' AND live_pair_id IS NOT NULL), 0)
+                FROM media WHERE folder_root = ? AND {VISIBLE}
             """, (folder_root,)).fetchone()
+            # Storage counts every file, Live Photo motion clips included.
+            total_bytes = connection.execute(
+                "SELECT COALESCE(SUM(file_size), 0) FROM media WHERE folder_root = ?", (folder_root,)).fetchone()[0]
 
-            busiest_row = connection.execute("""
+            busiest_row = connection.execute(f"""
                 SELECT capture_month, capture_day, COUNT(*) AS media_count
                 FROM media
-                WHERE folder_root = ? AND capture_month IS NOT NULL AND capture_day IS NOT NULL
+                WHERE folder_root = ? AND capture_month IS NOT NULL AND capture_day IS NOT NULL AND {VISIBLE}
                 GROUP BY capture_month, capture_day
                 ORDER BY media_count DESC, capture_month ASC, capture_day ASC
                 LIMIT 1
             """, (folder_root,)).fetchone()
 
-            year_rows = connection.execute("""
+            year_rows = connection.execute(f"""
                 SELECT capture_year,
                        SUM(CASE WHEN media_type = 'video' THEN 0 ELSE 1 END),
                        SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)
                 FROM media
-                WHERE folder_root = ? AND capture_year IS NOT NULL
+                WHERE folder_root = ? AND capture_year IS NOT NULL AND {VISIBLE}
                 GROUP BY capture_year ORDER BY capture_year ASC
             """, (folder_root,)).fetchall()
             media_by_year = tuple(YearMediaCount(int(year), int(photos), int(year_videos))
                                   for year, photos, year_videos in year_rows)
             largest = min(media_by_year, key=lambda item: (-item.total, item.year), default=None)
 
-            month_row = connection.execute("""
+            month_row = connection.execute(f"""
                 SELECT capture_month, COUNT(*) AS media_count
                 FROM media
-                WHERE folder_root = ? AND capture_month IS NOT NULL
+                WHERE folder_root = ? AND capture_month IS NOT NULL AND {VISIBLE}
                 GROUP BY capture_month ORDER BY media_count DESC, capture_month ASC
                 LIMIT 1
             """, (folder_root,)).fetchone()
 
-            camera_rows = connection.execute("""
+            camera_rows = connection.execute(f"""
                 SELECT camera, COUNT(*) AS media_count
                 FROM media
-                WHERE folder_root = ? AND camera IS NOT NULL AND camera != ''
+                WHERE folder_root = ? AND camera IS NOT NULL AND camera != '' AND {VISIBLE}
                 GROUP BY camera ORDER BY media_count DESC, camera ASC
             """, (folder_root,)).fetchall()
 
@@ -255,6 +299,7 @@ class MediaRepository:
                 top_camera=camera_rows[0][0] if camera_rows else None,
                 top_camera_count=int(camera_rows[0][1]) if camera_rows else 0,
                 camera_count=len(camera_rows),
+                live_photos=int(live),
             )
         finally:
             connection.close()

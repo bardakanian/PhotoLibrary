@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from .constants import THUMBNAIL_DIR, THUMBNAIL_EDGE, VIDEO_EXTENSIONS
+from .constants import COVER_EDGE, THUMBNAIL_DIR, THUMBNAIL_EDGE, VIDEO_EXTENSIONS
 from .database import ensure_app_dirs
 from .models import MediaMetadata
 
@@ -189,6 +189,7 @@ def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
     """Read date, size, duration and camera from `ffmpeg -i` output."""
     dates: list[str] = []
     make = model = None
+    live_motion = False
     width = height = None
     duration = None
     rotation = 0.0
@@ -205,6 +206,8 @@ def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
             model = model or value.strip()
         elif key_lower in {"com.apple.quicktime.make", "make"}:
             make = make or value.strip()
+        elif key_lower.startswith("com.apple.quicktime.live-photo"):
+            live_motion = True
         if duration is None and (match := _DURATION.search(stripped)):
             hours, minutes, seconds = match.groups()
             duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
@@ -215,7 +218,7 @@ def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
     if width and height and round(abs(rotation)) % 180 == 90:
         width, height = height, width
     captured = next((parsed for parsed in map(_parse_ffmpeg_date, filter(None, dates)) if parsed), None)
-    return MediaMetadata(captured, width, height, _camera_name(make, model), duration)
+    return MediaMetadata(captured, width, height, _camera_name(make, model), duration, live_motion)
 
 
 def read_video_metadata(path: Path) -> MediaMetadata:
@@ -264,15 +267,15 @@ def read_metadata(path: Path, media_type: str) -> MediaMetadata:
         found = read_video_metadata(path)
     # Embedded date first, then a date Spotlight found in the content, then the file's own times.
     captured = _usable(found.captured_at) or _usable(parse_macos_metadata_date(path)) or get_filesystem_date(path)
-    return MediaMetadata(captured, found.width, found.height, found.camera, found.duration)
+    return MediaMetadata(captured, found.width, found.height, found.camera, found.duration, found.live_motion)
 
 
 def get_capture_date(path: Path, media_type: str) -> datetime | None:
     return read_metadata(path, media_type).captured_at
 
 
-def thumbnail_cache_path(path: Path, file_size: int, modified_ns: int) -> Path:
-    signature = f"{path}|{file_size}|{modified_ns}|{THUMBNAIL_EDGE}"
+def thumbnail_cache_path(path: Path, file_size: int, modified_ns: int, edge: int = THUMBNAIL_EDGE) -> Path:
+    signature = f"{path}|{file_size}|{modified_ns}|{edge}"
     digest = hashlib.sha256(signature.encode()).hexdigest()
     # Two-level fan-out keeps directories small for libraries with tens of thousands of files.
     return THUMBNAIL_DIR / digest[:2] / f"{digest}.jpg"
@@ -283,9 +286,12 @@ def _failure_marker(target: Path) -> Path:
 
 
 def thumbnail_cache_files(path: Path, file_size: int, modified_ns: int) -> list[Path]:
-    """Every cache file that may exist for one media item."""
-    target = thumbnail_cache_path(path, file_size, modified_ns)
-    return [target, _failure_marker(target)]
+    """Every cache file that may exist for one media item (grid thumbnail and cover)."""
+    files = []
+    for edge in (THUMBNAIL_EDGE, COVER_EDGE):
+        target = thumbnail_cache_path(path, file_size, modified_ns, edge)
+        files += [target, _failure_marker(target)]
+    return files
 
 
 def _flatten(image: Image.Image) -> Image.Image:
@@ -298,7 +304,7 @@ def _flatten(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
-def _image_thumbnail(source: Path, target: Path) -> None:
+def _image_thumbnail(source: Path, target: Path, edge: int = THUMBNAIL_EDGE) -> None:
     with Image.open(source) as image:
         if getattr(image, "is_animated", False):
             try:
@@ -307,15 +313,14 @@ def _image_thumbnail(source: Path, target: Path) -> None:
                 pass
         # Let JPEGs decode at a reduced scale. This must happen before exif_transpose
         # loads the full image; a square request covers both rotated orientations.
-        image.draft("RGB", (THUMBNAIL_EDGE, THUMBNAIL_EDGE))
+        image.draft("RGB", (edge, edge))
         image = ImageOps.exif_transpose(image)
         image = _flatten(image)
-        image.thumbnail((THUMBNAIL_EDGE, THUMBNAIL_EDGE), Image.Resampling.LANCZOS)
+        image.thumbnail((edge, edge), Image.Resampling.LANCZOS)
         image.save(target, "JPEG", quality=85, optimize=True)
 
 
-def _video_thumbnail(source: Path, target: Path) -> bool:
-    edge = THUMBNAIL_EDGE
+def _video_thumbnail(source: Path, target: Path, edge: int = THUMBNAIL_EDGE) -> bool:
     scale = f"scale='if(gt(iw,ih),{edge},-2)':'if(gt(iw,ih),-2,{edge})'"
     # Prefer a frame one second in (skips black fade-ins); clips shorter than that
     # produce nothing, so fall back to the very first frame.
@@ -332,10 +337,14 @@ def _video_thumbnail(source: Path, target: Path) -> bool:
     return False
 
 
-def get_cached_thumbnail(path: Path, media_type: str, file_size: int, modified_ns: int) -> Path | None:
-    """Return the cached thumbnail, generating it if needed. Slow; call from a worker thread."""
+def get_cached_thumbnail(path: Path, media_type: str, file_size: int, modified_ns: int,
+                         edge: int = THUMBNAIL_EDGE) -> Path | None:
+    """Return the cached thumbnail (longest side `edge`), generating it if needed.
+
+    Slow; call from a worker thread.
+    """
     ensure_app_dirs()
-    target = thumbnail_cache_path(path, file_size, modified_ns)
+    target = thumbnail_cache_path(path, file_size, modified_ns, edge)
     if target.exists():
         return target
     failed = _failure_marker(target)
@@ -349,10 +358,10 @@ def get_cached_thumbnail(path: Path, media_type: str, file_size: int, modified_n
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if media_type == "video":
-            if not _video_thumbnail(path, partial):
+            if not _video_thumbnail(path, partial, edge):
                 raise OSError("ffmpeg produced no frame")
         else:
-            _image_thumbnail(path, partial)
+            _image_thumbnail(path, partial, edge)
         partial.replace(target)
         return target
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):

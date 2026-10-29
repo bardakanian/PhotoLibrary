@@ -31,35 +31,45 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _move(path: Path, folder: Path, move_to_trash: Callable[[Path], bool]) -> str | None:
+    """Trash one file. Returns None on success (or if it is already gone), else the reason."""
+    if not _inside(path, folder):
+        return "It is outside the library folder."
+    if not path.exists():
+        return None
+    try:
+        moved = move_to_trash(path)
+    except OSError as exc:
+        return str(exc)
+    return None if moved else "The system could not move it to the Trash. Check that you can change this folder."
+
+
 def trash_items(folder: Path, items: Sequence[MediaItem], move_to_trash: Callable[[Path], bool],
                 repository: MediaRepository | None = None) -> TrashResult:
     """Trash each file, then remove the trashed ones from the index and thumbnail cache.
 
-    Files outside the library folder are refused. A file that is already gone is
-    removed from the index too, since it no longer exists to show.
+    A Live Photo takes its motion clip along. Files outside the library folder are refused.
+    A file that is already gone is removed from the index too, since it no longer exists to show.
     """
     repository = repository or MediaRepository()
     result = TrashResult()
+    removed_ids: list[int] = []
     for item in items:
-        path = item.path
-        if not _inside(path, folder):
-            result.failed.append((item, "It is outside the library folder."))
+        problem = _move(item.path, folder, move_to_trash)
+        if problem:
+            result.failed.append((item, problem))
             continue
-        if not path.exists():
-            result.trashed.append(item)
-            continue
-        try:
-            moved = move_to_trash(path)
-        except OSError as exc:
-            result.failed.append((item, str(exc)))
-            continue
-        if moved:
-            result.trashed.append(item)
-        else:
-            result.failed.append((item, "The system could not move it to the Trash. Check that you can change this folder."))
+        result.trashed.append(item)
+        removed_ids.append(item.id)
+        if item.live_video and item.live_video_id is not None:
+            problem = _move(Path(item.live_video), folder, move_to_trash)
+            if problem:
+                result.failed.append((item, f"The photo was moved, but its Live Photo video was not: {problem}"))
+            else:
+                removed_ids.append(item.live_video_id)
 
-    if result.trashed:
-        repository.remove_many(folder, [item.id for item in result.trashed])
+    if removed_ids:
+        repository.remove_many(folder, removed_ids)
         for item in result.trashed:
             for cached in thumbnail_cache_files(item.path, item.file_size, item.modified_ns):
                 try:

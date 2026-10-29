@@ -12,10 +12,16 @@ incremental indexer) come from the On This Day app.
 
 - **Library folder** chosen once and remembered. It's indexed in the background with a
   progress bar. Every launch, and **Rescan**, picks up added, changed and deleted files.
+- **Updates by itself:** the folder is watched (macOS FSEvents), so photos you add, move
+  between folders or delete show up a few seconds later, with no ⌘R needed. A big copy is
+  handled as one update once it finishes. You can turn this off in Settings.
 - **Virtualized grid** that stays smooth with 50,000+ items. It has month section
   headers with a sticky header at the top, and a thumbnail size slider.
 - **Years / Months / All Photos** views. Click a year to see its months, and a month to
-  jump to it in All Photos.
+  jump to it in All Photos. Year and month tiles use larger, sharp cover images.
+- **Live Photos:** an iPhone Live Photo (for example `IMG_4330.HEIC` plus `IMG_4330.MOV`)
+  shows once, as a photo with a LIVE badge, not as a photo plus a separate 1–3 second video.
+  In the viewer, **◉ LIVE** (or L) plays the motion. Moving one to the Trash takes both files.
 - **Sidebar**: All Photos, Photos and Videos with counts, plus each top-level subfolder
   as an **album** with its newest photo as a thumbnail. An album includes everything in
   its nested folders. Toggle the sidebar with ⌥⌘S.
@@ -107,6 +113,8 @@ Open **Settings** with ⌘, or the ⚙ button at the right end of the toolbar (a
 - **Theme**: follow the system appearance, or always light or dark.
 - **Time format**: follow the system clock, a 12-hour clock (1:30 PM) or a 24-hour
   clock (13:30). It applies wherever a capture time is shown, such as the viewer header.
+- **Update automatically when files change** (on by default): turn off to rely on
+  Rescan (⌘R) instead.
 
 Qt Multimedia's informational messages (the "Using Qt multimedia with FFmpeg" banner
 and FFmpeg's per-file stream details) are hidden. Warnings and errors still appear. To
@@ -120,11 +128,15 @@ QT_LOGGING_RULES="qt.multimedia.*=true" python app.py
 
 - Python 3.10 or newer (developed on 3.14)
 - macOS is the primary target; Windows and Linux should work
-- Dependencies in `requirements.txt`: PySide6, Pillow, pillow-heif (HEIC/HEIF) and
-  imageio-ffmpeg (video dates, thumbnails and metadata)
+- Dependencies in `requirements.txt`:
+  - PySide6
+  - Pillow
+  - pillow-heif (HEIC/HEIF)
+  - imageio-ffmpeg (video dates, thumbnails and metadata)
+  - watchdog (folder watching)
 
-The app still runs without pillow-heif or imageio-ffmpeg; HEIC files or video previews
-are then limited.
+The app still runs without pillow-heif, imageio-ffmpeg or watchdog; HEIC files, video
+previews or automatic updates are then limited.
 
 ## Run it
 
@@ -189,6 +201,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Previous / next item | ← / → (Home / End for first / last) |
 | Zoom photo / actual size | ⌘= / ⌘−, ⌘0 (or double-click, pinch, ⌘-scroll) |
 | Play / pause, skip 5 s, mute | Space, ⇧← / ⇧→, M |
+| Play a Live Photo | L (or the ◉ LIVE button) |
 | **App** | |
 | Settings (appearance, 12/24-hour time) | ⌘, or the ⚙ toolbar button |
 | Close window | ⌘W |
@@ -216,6 +229,11 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
   - **Why not everything in memory?** Each decoded thumbnail is about 0.5 MB, so a
     50,000-item library would need about 25 GB of RAM. Disk-cached thumbnails plus
     read-ahead give the same smooth scrolling at a fixed memory cost.
+  - **Sharp covers.** Years and Months tiles are far bigger than grid cells, so each cover
+    also gets a 1,600 px version, about one per month and per year.
+  - **Cleaned up.** Editing, moving or deleting a file leaves its old thumbnail behind. After
+    preparation, `core/cache_cleanup.py` deletes thumbnails no indexed file needs, so the
+    cache doesn't grow forever.
 - **The UI thread never reads files or the database.** Queries, grouping, settings
   writes and thumbnail decoding run in the background (`ui/tasks.py`).
 
@@ -233,6 +251,10 @@ photolibrary/
 │   ├── grid_layout.py     Sectioned grid geometry
 │   ├── search.py          Search box parsing (filename and dates)
 │   ├── trash.py           Move to Trash plus index and thumbnail cleanup
+│   ├── live_photos.py     Pairs Live Photo stills with their motion clips
+│   ├── watcher.py         Folder watching (FSEvents via watchdog) with change batching
+│   ├── thumbnail_warmer.py Background creation of missing thumbnails and covers
+│   ├── cache_cleanup.py   Removes thumbnails no indexed file needs
 │   ├── cache.py           Cost-bounded LRU cache
 │   ├── workqueue.py       Re-prioritisable background job queue
 │   ├── formatting.py      Labels for sizes, durations, dates
@@ -249,7 +271,7 @@ photolibrary/
     ├── pages/             Grid page, full-window viewer and Library Insights
     ├── theme/             Colours, typography, metrics, stylesheet
     └── widgets/           Sidebar, info panel, image canvas, video player, empty state, search box
-tests/                     unittest suite for the core
+tests/                     unittest suite: core modules, plus tests/ui (the real window, headless)
 tools/make_demo_library.py Synthetic library generator
 tools/make_launcher.py     Builds the macOS launcher app
 tools/make_screenshots.py  Regenerates the README screenshots
@@ -262,6 +284,15 @@ Run the tests from the project root:
 
 ```bash
 python -m unittest -v
+```
+
+The suite has 146 tests (about a minute). It includes headless UI tests that drive the
+real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos
+and folder watching) on a generated library. To skip the UI tests while iterating (about
+15 seconds):
+
+```bash
+SKIP_UI_TESTS=1 python -m unittest
 ```
 
 App data (config, the SQLite index, thumbnails and the log) lives in

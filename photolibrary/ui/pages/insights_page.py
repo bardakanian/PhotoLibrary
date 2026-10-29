@@ -279,7 +279,10 @@ class LibraryInsightsPage(QWidget):
             return
         total = result.combined_total
         self.cards["total"].set_value(f"{total:,}", "Photos and videos combined")
-        self.cards["photos"].set_value(f"{result.total_photos:,}", _share(result.total_photos, total))
+        photos_detail = _share(result.total_photos, total)
+        if result.live_photos:
+            photos_detail += f" · {_plural(result.live_photos, 'Live Photo')}"
+        self.cards["photos"].set_value(f"{result.total_photos:,}", photos_detail)
         self.cards["videos"].set_value(f"{result.total_videos:,}", _share(result.total_videos, total))
         self.cards["storage"].set_value(format_size(result.total_bytes),
                                         f"About {format_size(result.total_bytes // total)} per item")

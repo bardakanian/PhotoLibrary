@@ -66,3 +66,28 @@ class ThumbnailWarmerTests(TempAppTestCase):
             image.load()
         leftovers = [path for path in results[0].parent.iterdir() if ".part" in path.name]
         self.assertEqual(leftovers, [])
+
+
+class CoverThumbnailTests(TempAppTestCase):
+    def test_cover_thumbnails_are_larger_and_separate(self):
+        from photolibrary.core.constants import COVER_EDGE, THUMBNAIL_EDGE
+        source = self.write_photo(self.root / "big.jpg", size=(3000, 2000))
+        grid = media.get_cached_thumbnail(source, "image", 1, 1)
+        cover = media.get_cached_thumbnail(source, "image", 1, 1, COVER_EDGE)
+        self.assertNotEqual(grid, cover)
+        with Image.open(grid) as small, Image.open(cover) as large:
+            self.assertEqual(small.size, (THUMBNAIL_EDGE, round(THUMBNAIL_EDGE * 2 / 3)))
+            self.assertEqual(large.size, (COVER_EDGE, round(COVER_EDGE * 2 / 3)))
+        # Trash cleanup knows about both files.
+        self.assertTrue({grid, cover} <= set(media.thumbnail_cache_files(source, 1, 1)))
+
+    def test_warming_covers_uses_the_cover_size(self):
+        from photolibrary.core.constants import COVER_EDGE
+        library = self.make_library("covers")
+        self.write_photo(library / "a.jpg", datetime(2021, 1, 1), size=(2000, 1500))
+        MediaIndexer(library, threading.Event(), 1, lambda event: None).run()
+        items = MediaRepository().query(library)
+        result = warm_thumbnails(items, threading.Event(), edge=COVER_EDGE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(missing_thumbnails(items, COVER_EDGE), [])
+        self.assertEqual(len(missing_thumbnails(items)), 1)  # the grid size is separate

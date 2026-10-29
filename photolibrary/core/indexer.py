@@ -2,12 +2,14 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable, Iterator
 
 from .constants import BATCH_COMMIT_SIZE, METADATA_VERSION, SUPPORTED_EXTENSIONS
-from .database import open_database
+from .database import VISIBLE, open_database
+from .live_photos import PairingRow, pair_live_photos
 from .media import HEIC_ENABLED, media_type_for_path, read_metadata
 
 METADATA_WORKERS = min(8, os.cpu_count() or 4)
@@ -72,6 +74,23 @@ class MediaIndexer:
     def send(self, event_type: str, **payload: object) -> None:
         self.emit({"type": event_type, "scan_id": self.scan_id, **payload})
 
+    def pair_live_photos(self, connection: sqlite3.Connection) -> int:
+        """Re-pair every Live Photo in the folder (cheap: one query and a dictionary pass)."""
+        rows = [
+            PairingRow(row_id, path, media_type, datetime.fromisoformat(stamp) if stamp else None,
+                       duration, bool(live_motion))
+            for row_id, path, media_type, stamp, duration, live_motion in connection.execute("""
+                SELECT id, file_path, media_type, capture_ts, duration, live_motion FROM media WHERE folder_root = ?
+            """, (self.folder_root,))
+        ]
+        pairs = pair_live_photos(rows)
+        connection.execute("UPDATE media SET live_pair_id = NULL WHERE folder_root = ? AND live_pair_id IS NOT NULL",
+                           (self.folder_root,))
+        connection.executemany("UPDATE media SET live_pair_id = ? WHERE id = ?",
+                               [link for photo, video in pairs for link in ((video, photo), (photo, video))])
+        connection.commit()
+        return len(pairs)
+
     def run(self) -> None:
         connection: sqlite3.Connection | None = None
         # Reading metadata (EXIF, mdls, ffmpeg) is the slow part and mostly waits on
@@ -116,8 +135,8 @@ class MediaIndexer:
                         INSERT INTO media (
                             folder_root, file_path, file_name, album, file_size, modified_ns,
                             capture_ts, capture_year, capture_month, capture_day, media_type,
-                            width, height, camera, duration, metadata_version
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            width, height, camera, duration, metadata_version, live_motion
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(folder_root, file_path) DO UPDATE SET
                             file_name=excluded.file_name, album=excluded.album,
                             file_size=excluded.file_size, modified_ns=excluded.modified_ns,
@@ -125,11 +144,13 @@ class MediaIndexer:
                             capture_month=excluded.capture_month, capture_day=excluded.capture_day,
                             media_type=excluded.media_type, width=excluded.width, height=excluded.height,
                             camera=excluded.camera, duration=excluded.duration,
-                            metadata_version=excluded.metadata_version
+                            metadata_version=excluded.metadata_version,
+                            live_motion=excluded.live_motion
                     """, (
                         self.folder_root, file_path, os.path.basename(file_path),
                         album_for(self.folder_root, directory), file_size, modified_ns, *date_values,
                         media_type, meta.width, meta.height, meta.camera, meta.duration, METADATA_VERSION,
+                        int(meta.live_motion),
                     ))
                 except Exception:
                     errors += 1
@@ -191,11 +212,14 @@ class MediaIndexer:
                                     (self.folder_root, file_path))
                 deleted += 1
             connection.commit()
-            indexed, videos = connection.execute("""
-                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0) FROM media WHERE folder_root = ?
+            live_photos = self.pair_live_photos(connection)
+            indexed, videos = connection.execute(f"""
+                SELECT COUNT(*), COALESCE(SUM(media_type = 'video'), 0) FROM media
+                WHERE folder_root = ? AND {VISIBLE}
             """, (self.folder_root,)).fetchone()
             self.send("scan_complete", scanned=processed, updated=updated, unchanged=unchanged,
-                      deleted=deleted, errors=errors, total_indexed=indexed, total_videos=videos)
+                      deleted=deleted, errors=errors, total_indexed=indexed, total_videos=videos,
+                      live_photos=live_photos)
         except Exception as exc:
             self.send("scan_error", message=str(exc))
         finally:

@@ -177,11 +177,14 @@ class SettingsTests(TempAppTestCase):
         self.assertEqual(loaded.library_folder, self.root)
         loaded.theme, loaded.zoom, loaded.view_mode, loaded.time_format = "dark", 200, "months", "12"
         loaded.sort_order = "oldest"
+        loaded.watch_folder = False
         store.save(loaded)
         saved = json.loads(self.config_file.read_text())
         self.assertEqual((saved["legacy"], saved["theme"], saved["zoom"]), (42, "dark", 200))
         self.assertEqual((store.load().view_mode, store.load().time_format, store.load().sort_order),
                          ("months", "12", "oldest"))
+        self.assertFalse(store.load().watch_folder)
+        self.assertTrue(AppSettings().watch_folder)
 
     def test_invalid_values_fall_back_to_defaults(self):
         self.app_dir.mkdir()

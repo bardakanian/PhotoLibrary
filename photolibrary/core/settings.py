@@ -20,6 +20,7 @@ class AppSettings:
     sort_order: str = "newest"  # "newest" or "oldest" first
     info_panel_visible: bool = False
     sidebar_visible: bool = True
+    watch_folder: bool = True  # rescan automatically when files change
     window_geometry: str = ""
 
 
@@ -67,6 +68,7 @@ class SettingsStore:
             sort_order=sort_order,
             info_panel_visible=bool(data.get("info_panel_visible", False)),
             sidebar_visible=bool(data.get("sidebar_visible", True)),
+            watch_folder=bool(data.get("watch_folder", True)),
             window_geometry=str(data.get("window_geometry", "")),
         )
 
@@ -89,6 +91,7 @@ class SettingsStore:
             "sort_order": settings.sort_order,
             "info_panel_visible": settings.info_panel_visible,
             "sidebar_visible": settings.sidebar_visible,
+            "watch_folder": settings.watch_folder,
             "window_geometry": settings.window_geometry,
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.

@@ -142,7 +142,7 @@ class InfoPanel(QFrame):
 
         item = items[0]
         self.title.setText(item.name)
-        self.subtitle.setText("Video" if item.is_video else "Photo")
+        self.subtitle.setText("Video" if item.is_video else "Live Photo" if item.is_live else "Photo")
         self.values["date"].setText(format_date(item.captured_at, hour12=self.hour12))
         self.values["dimensions"].setText(format_dimensions(item.width, item.height))
         self.values["size"].setText(format_size(item.file_size))

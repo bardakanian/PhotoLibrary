@@ -20,6 +20,11 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 # Longest side of a cached thumbnail. Aspect ratio is kept (no padding) so the grid can
 # crop to square cells; 512 px stays sharp for a 256-point cell on a Retina display.
 THUMBNAIL_EDGE = 512
+# Larger thumbnails used only as Years/Months tile covers (a few hundred per library), which
+# are drawn up to about 1,000 device pixels wide.
+COVER_EDGE = 1600
 BATCH_COMMIT_SIZE = 250
 # Bump when read_metadata learns something new, so the next scan re-reads every file.
-METADATA_VERSION = 3  # 2: no copy-time dates for metadata-less files; 3: ignore epoch/unset-clock dates
+# 2: no copy-time dates for metadata-less files; 3: ignore epoch/unset-clock dates;
+# 4: detect Live Photo motion clips
+METADATA_VERSION = 4

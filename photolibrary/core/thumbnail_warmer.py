@@ -12,6 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from .constants import THUMBNAIL_EDGE
 from .media import _failure_marker, get_cached_thumbnail, thumbnail_cache_path
 from .models import MediaItem
 
@@ -29,11 +30,11 @@ class WarmResult:
     cancelled: bool
 
 
-def missing_thumbnails(items: Sequence[MediaItem]) -> list[MediaItem]:
-    """Items with neither a cached thumbnail nor a remembered failure."""
+def missing_thumbnails(items: Sequence[MediaItem], edge: int = THUMBNAIL_EDGE) -> list[MediaItem]:
+    """Items with neither a cached thumbnail (of this size) nor a remembered failure."""
     missing = []
     for item in items:
-        target = thumbnail_cache_path(item.path, item.file_size, item.modified_ns)
+        target = thumbnail_cache_path(item.path, item.file_size, item.modified_ns, edge)
         if not target.exists() and not _failure_marker(target).exists():
             missing.append(item)
     return missing
@@ -41,12 +42,12 @@ def missing_thumbnails(items: Sequence[MediaItem]) -> list[MediaItem]:
 
 def warm_thumbnails(items: Sequence[MediaItem], stop_event: threading.Event,
                     on_progress: Callable[[int, int], None] | None = None,
-                    workers: int = DEFAULT_WORKERS) -> WarmResult:
+                    workers: int = DEFAULT_WORKERS, edge: int = THUMBNAIL_EDGE) -> WarmResult:
     """Create thumbnails for `items` (in order) that don't have one yet.
 
     `on_progress(done, missing)` is called from this thread every so often and at the end.
     """
-    todo = missing_thumbnails(items)
+    todo = missing_thumbnails(items, edge)
     created = failed = done = 0
     if not todo:
         return WarmResult(len(items), 0, 0, 0, stop_event.is_set())
@@ -77,7 +78,7 @@ def warm_thumbnails(items: Sequence[MediaItem], stop_event: threading.Event,
             if stop_event.is_set():
                 break
             in_flight.add(executor.submit(get_cached_thumbnail, item.path, item.media_type,
-                                          item.file_size, item.modified_ns))
+                                          item.file_size, item.modified_ns, edge))
             if len(in_flight) >= max(1, workers) * 2:
                 collect(FIRST_COMPLETED)
         while in_flight and not stop_event.is_set():

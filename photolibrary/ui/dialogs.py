@@ -1,10 +1,11 @@
-from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QVBoxLayout
 
 from .time_format import system_uses_12_hour
 
 
 class PreferencesDialog(QDialog):
-    def __init__(self, current_theme: str, current_time_format: str = "system", parent=None):
+    def __init__(self, current_theme: str, current_time_format: str = "system", watch_folder: bool = True,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -32,6 +33,13 @@ class PreferencesDialog(QDialog):
         self.time_format.setAccessibleName("Time format")
         form.addRow("Time format", self.time_format)
         layout.addLayout(form)
+        library_heading = QLabel("Library")
+        library_heading.setProperty("role", "section")
+        layout.addWidget(library_heading)
+        self.watch_folder = QCheckBox("Update automatically when files change in the library folder")
+        self.watch_folder.setChecked(watch_folder)
+        self.watch_folder.setToolTip("When off, use Rescan (⌘R) after adding, moving or deleting files.")
+        layout.addWidget(self.watch_folder)
         note = QLabel("System follows your macOS appearance and clock settings.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
@@ -44,6 +52,10 @@ class PreferencesDialog(QDialog):
     @property
     def selected_theme(self) -> str:
         return self.theme.currentData()
+
+    @property
+    def selected_watch_folder(self) -> bool:
+        return self.watch_folder.isChecked()
 
     @property
     def selected_time_format(self) -> str:

@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QSize, Signal, Slot
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 from ..core.cache import LRUCache
+from ..core.constants import COVER_EDGE, THUMBNAIL_EDGE
 from ..core.media import get_cached_thumbnail, thumbnail_cache_path
 from ..core.models import MediaItem
 from ..core.workqueue import WorkQueue
@@ -20,14 +21,23 @@ from ..core.workqueue import WorkQueue
 # Decode sizes (device pixels of the cell's shorter side). Few buckets keep the cache
 # effective across zoom levels; the painter scales the small remaining difference.
 BUCKETS = (96, 160, 256, 384, 512)
+# Years/Months tiles are much larger than grid cells; they decode from the 1,600 px covers.
+COVER_BUCKETS = (768, 1024, 1536)
+ALL_BUCKETS = BUCKETS + COVER_BUCKETS
 CACHE_BYTES = 480 * 1024 * 1024
 
 
-def bucket_for(pixels: float) -> int:
-    for bucket in BUCKETS:
+def bucket_for(pixels: float, cover: bool = False) -> int:
+    """Smallest decode size covering `pixels`. Only covers may go above the grid's 512 px."""
+    sizes = ALL_BUCKETS if cover else BUCKETS
+    for bucket in sizes:
         if bucket >= pixels:
             return bucket
-    return BUCKETS[-1]
+    return sizes[-1]
+
+
+def edge_for_bucket(bucket: int) -> int:
+    return COVER_EDGE if bucket > THUMBNAIL_EDGE else THUMBNAIL_EDGE
 
 
 def decode_scaled(path: Path, bucket: int) -> QImage | None:
@@ -77,7 +87,7 @@ class ThumbnailLoader(QObject):
         exact = self.cache.get(_thumb_key(item, bucket))
         if exact is not None:
             return exact
-        for other in BUCKETS:
+        for other in ALL_BUCKETS:
             if other != bucket:
                 fallback = self.cache.get(_thumb_key(item, other))
                 if fallback is not None:
@@ -144,7 +154,7 @@ class ThumbnailLoader(QObject):
             pass  # the loader was destroyed during shutdown
 
     def _read_job(self, item: MediaItem, bucket: int, key: tuple, generation: int) -> None:
-        cached = thumbnail_cache_path(item.path, item.file_size, item.modified_ns)
+        cached = thumbnail_cache_path(item.path, item.file_size, item.modified_ns, edge_for_bucket(bucket))
         image = decode_scaled(cached, bucket) if cached.exists() else None
         if image is not None:
             self._emit(key, image, generation)
@@ -153,5 +163,6 @@ class ThumbnailLoader(QObject):
         self._generate_queue.submit(key, lambda: self._generate_job(item, bucket, key, generation))
 
     def _generate_job(self, item: MediaItem, bucket: int, key: tuple, generation: int) -> None:
-        result = get_cached_thumbnail(item.path, item.media_type, item.file_size, item.modified_ns)
+        result = get_cached_thumbnail(item.path, item.media_type, item.file_size, item.modified_ns,
+                                      edge_for_bucket(bucket))
         self._emit(key, decode_scaled(result, bucket) if result else None, generation)

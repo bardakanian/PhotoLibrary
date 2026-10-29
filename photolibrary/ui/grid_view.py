@@ -49,8 +49,8 @@ class ThumbnailDelegate(QStyledItemDelegate):
         self.subtitle_font.setPixelSize(Typography.BODY)
         self.subtitle_font.setWeight(QFont.Weight.Medium)
 
-    def bucket_for_rect(self, rect: QRect, ratio: float) -> int:
-        return bucket_for(min(rect.width(), rect.height()) * ratio)
+    def bucket_for_rect(self, rect: QRect, ratio: float, cover: bool = False) -> int:
+        return bucket_for(min(rect.width(), rect.height()) * ratio, cover)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         item = index.data(ItemRole)
@@ -60,7 +60,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         colors = self.theme.colors
         rect = QRectF(option.rect)
         ratio = painter.device().devicePixelRatioF() if painter.device() else 1.0
-        bucket = self.bucket_for_rect(option.rect, ratio)
+        bucket = self.bucket_for_rect(option.rect, ratio, cover=summary is not None)
         pixmap = self.loader.pixmap(item, bucket)
         if not self.loader.has_exact(item, bucket):
             self.loader.request(item, bucket)
@@ -84,6 +84,8 @@ class ThumbnailDelegate(QStyledItemDelegate):
             self._paint_summary(painter, rect, summary)
         elif item.is_video:
             self._paint_video_badge(painter, rect, item.duration)
+        elif item.is_live:
+            self._paint_live_badge(painter, rect)
 
         if selected:
             accent = QColor(colors.accent)
@@ -107,6 +109,24 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect.adjusted(1, 1, -1, -1))
         painter.restore()
+
+    def _paint_live_badge(self, painter: QPainter, rect: QRectF) -> None:
+        """Apple's Live Photo mark: a ring around a dot, top left."""
+        if rect.width() < 48:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        centre = QPointF(rect.left() + 14, rect.top() + 14)
+        for colour, width in ((QColor(0, 0, 0, 90), 3.2), (QColor(255, 255, 255, 240), 1.6)):
+            pen = QPen(colour, width)
+            pen.setDashPattern([1.2, 1.4])
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(centre, 8.0, 8.0)
+            painter.setPen(QPen(colour, width - 0.4))
+            painter.drawEllipse(centre, 5.0, 5.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 240))
+        painter.drawEllipse(centre, 2.2, 2.2)
 
     def _paint_video_badge(self, painter: QPainter, rect: QRectF, duration: float | None) -> None:
         if rect.width() < 48:
@@ -523,7 +543,7 @@ class MediaGridView(QAbstractItemView):
             [row for row in reversed(behind) if row not in visible]
         items = [item for item in (model.item_at(row) for row in rows) if item is not None]
         rect = self._layout.rect_for(visible.start if visible else 0)
-        bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF())
+        bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF(), cover=self.mode != "all")
         self.loader.focus(items, bucket)
 
     def _prefetch_around(self) -> None:
@@ -534,7 +554,7 @@ class MediaGridView(QAbstractItemView):
         offset, height = self.verticalOffset(), self.viewport().height()
         visible = self._layout.indexes_in(offset, offset + height)
         rect = self._layout.rect_for(visible.start if visible else 0)
-        bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF())
+        bucket = bucket_for(min(rect.width, rect.height) * self.devicePixelRatioF(), cover=self.mode != "all")
         # A decoded thumbnail is about bucket x (4/3 bucket) x 4 bytes; keep a quarter of the cache spare.
         budget = max(len(visible), int(CACHE_BYTES * 0.75 // (bucket * bucket * 4 * 4 // 3)))
         rows = list(visible)
