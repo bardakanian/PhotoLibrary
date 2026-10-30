@@ -448,8 +448,16 @@ class MediaGridView(QAbstractItemView):
     # Painting --------------------------------------------------------------
 
     def paintEvent(self, event) -> None:
-        colors = self.theme.colors
+        # End the painter explicitly: if anything keeps this frame alive (the freeze monitor's
+        # stack snapshot, a traceback), a painter left open corrupts the window and crashes Qt.
         painter = QPainter(self.viewport())
+        try:
+            self._paint(painter, event)
+        finally:
+            painter.end()
+
+    def _paint(self, painter: QPainter, event) -> None:
+        colors = self.theme.colors
         painter.fillRect(event.rect(), QColor(colors.background))
         model = self.model()
         if model is None or not self._layout.item_count:

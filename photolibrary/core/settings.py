@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .constants import APP_DIR, CONFIG_FILE
@@ -12,7 +12,8 @@ MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 80, 320, 160
 
 @dataclass(slots=True)
 class AppSettings:
-    library_folder: Path | None = None
+    # The library is one or more folders. A missing one (an unplugged drive) is kept, not forgotten.
+    library_folders: list[Path] = field(default_factory=list)
     theme: str = "system"
     time_format: str = "system"  # "system", "12" or "24" hour clock
     zoom: int = DEFAULT_ZOOM
@@ -22,6 +23,17 @@ class AppSettings:
     sidebar_visible: bool = True
     watch_folder: bool = True  # rescan automatically when files change
     window_geometry: str = ""
+    # Albums left out of All Photos, search, counts and Insights: (resolved library folder, album name).
+    hidden_albums: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _hidden_albums(value) -> list[tuple[str, str]]:
+    albums: list[tuple[str, str]] = []
+    for entry in value if isinstance(value, list) else []:
+        if isinstance(entry, list) and len(entry) == 2 and all(isinstance(part, str) and part for part in entry):
+            if tuple(entry) not in albums:
+                albums.append(tuple(entry))
+    return albums
 
 
 class SettingsStore:
@@ -37,12 +49,16 @@ class SettingsStore:
         if not isinstance(data, dict):
             data = {}
 
-        folder = None
-        folder_text = data.get("library_folder", "")
-        if folder_text:
-            candidate = Path(folder_text).expanduser()
-            if candidate.is_dir():
-                folder = candidate
+        folder_texts = data.get("library_folders")
+        if not isinstance(folder_texts, list):
+            # Settings from before several folders were supported.
+            folder_texts = [data.get("library_folder", "")]
+        folders: list[Path] = []
+        for text in folder_texts:
+            if isinstance(text, str) and text:
+                candidate = Path(text).expanduser()
+                if candidate not in folders:
+                    folders.append(candidate)
         theme = data.get("theme", "system")
         if theme not in {"system", "light", "dark"}:
             theme = "system"
@@ -60,7 +76,7 @@ class SettingsStore:
         if view_mode not in VIEW_MODES:
             view_mode = "all"
         return AppSettings(
-            library_folder=folder,
+            library_folders=folders,
             theme=theme,
             time_format=time_format,
             zoom=zoom,
@@ -70,6 +86,7 @@ class SettingsStore:
             sidebar_visible=bool(data.get("sidebar_visible", True)),
             watch_folder=bool(data.get("watch_folder", True)),
             window_geometry=str(data.get("window_geometry", "")),
+            hidden_albums=_hidden_albums(data.get("hidden_albums")),
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -83,7 +100,9 @@ class SettingsStore:
         if not isinstance(existing, dict):
             existing = {}
         existing.update({
-            "library_folder": str(settings.library_folder) if settings.library_folder else "",
+            "library_folders": [str(folder) for folder in settings.library_folders],
+            # Older versions read only this key; keep it pointing at the first folder.
+            "library_folder": str(settings.library_folders[0]) if settings.library_folders else "",
             "theme": settings.theme,
             "time_format": settings.time_format,
             "zoom": settings.zoom,
@@ -93,6 +112,7 @@ class SettingsStore:
             "sidebar_visible": settings.sidebar_visible,
             "watch_folder": settings.watch_folder,
             "window_geometry": settings.window_geometry,
+            "hidden_albums": [list(pair) for pair in settings.hidden_albums],
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.
         temp = CONFIG_FILE.with_suffix(".tmp")

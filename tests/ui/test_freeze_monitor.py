@@ -52,3 +52,39 @@ class FreezeMonitorTests(unittest.TestCase):
         reports = [line for line in logs.output if "not responding" in line]
         self.assertEqual(len(reports), 1)  # report_interval is 60 s
         self.assertEqual(self.monitor.freezes, 3)
+
+
+class StackSnapshotTests(unittest.TestCase):
+    """The monitor must never keep another thread's frames (and their locals) alive."""
+
+    def test_snapshot_keeps_no_locals_alive_and_reads_no_files(self):
+        import linecache
+        import threading
+        import weakref
+        from unittest.mock import patch
+        from photolibrary.ui import freeze_monitor
+
+        class Painter:  # stands in for a QPainter local in a paintEvent
+            pass
+
+        ready, finish = threading.Event(), threading.Event()
+        alive = {}
+
+        def painting():
+            painter = Painter()
+            alive["ref"] = weakref.ref(painter)
+            ready.set()
+            finish.wait(5)
+
+        thread = threading.Thread(target=painting)
+        thread.start()
+        ready.wait(5)
+        # Reading source files releases the GIL, letting the other thread run on mid-snapshot.
+        with patch.object(linecache, "getline", side_effect=AssertionError("file access")), \
+                patch.object(linecache, "checkcache", side_effect=AssertionError("file access")):
+            stacks = freeze_monitor._snapshot_stacks(threading.get_ident())
+        self.assertIn("painting", [frame.name for frame in stacks[thread.ident]])
+        finish.set()
+        thread.join(5)
+        self.assertIsNone(alive["ref"](), "the snapshot kept the thread's locals alive")
+        self.assertIn("finish.wait(5)", "".join(stacks[thread.ident].format()))  # lines still readable later

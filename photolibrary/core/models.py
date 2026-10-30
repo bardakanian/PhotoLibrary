@@ -61,6 +61,7 @@ class Album:
     name: str
     count: int
     cover: MediaItem | None
+    root: str = ""  # the library folder it belongs to
 
 
 @dataclass(frozen=True, slots=True)

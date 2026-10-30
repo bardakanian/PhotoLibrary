@@ -132,10 +132,17 @@ class IndexerTests(TempAppTestCase):
             events = run_scan(library, stop=stop)
         self.assertEqual(events[-1]["type"], "scan_cancelled")
 
-    def test_missing_folder_reports_empty_scan(self):
-        events = run_scan(self.root / "does-not-exist")
-        self.assertEqual(events[-1]["type"], "scan_complete")
-        self.assertEqual(events[-1]["total_indexed"], 0)
+    def test_missing_folder_keeps_its_index(self):
+        """An unplugged drive must not look like every file was deleted."""
+        library = self.make_library()
+        self.write_photo(library / "a.jpg", datetime(2020, 1, 1))
+        run_scan(library)
+        moved = library.rename(self.root / "unplugged")
+        events = run_scan(library)
+        self.assertEqual((events[-1]["type"], events[-1].get("missing")), ("scan_error", True))
+        self.assertEqual(len(database.MediaRepository().query(library)), 1)
+        moved.rename(library)
+        self.assertEqual(run_scan(library)[-1]["total_indexed"], 1)
 
     def test_batches_are_committed_during_large_scans(self):
         library = self.make_library()

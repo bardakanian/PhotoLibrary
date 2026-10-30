@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,6 +7,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox
 
 from photolibrary.core import media
+from photolibrary.ui.widgets.sidebar import CountRole
 
 from .base import WindowTestCase
 
@@ -157,13 +159,13 @@ class FilterTests(WindowTestCase):
         self.assertIn("No results", self.window.grid_page.empty.title_label.text())
 
     def test_album_scope(self):
-        self.window.sidebar.select_scope("all", "2026-1")
+        self.window.sidebar.select_album("2026-1")
         self.wait_until(lambda: len(self.window.model.items) == 12, message="album")
         self.assertTrue(all(name.startswith("JAN_") for name in self.names))
         self.assertEqual([section.title for section in self.window.model.sections], ["January 2026"])
 
     def test_sort_order_toggle(self):
-        self.window.sidebar.select_scope("all", "2026-2")
+        self.window.sidebar.select_album("2026-2")
         self.wait_until(lambda: len(self.window.model.items) == 12, message="album")
         self.assertEqual(self.names[0], "FEB_11.jpg")
         self.window.sort_button.click()
@@ -211,7 +213,106 @@ class WatchingTests(WindowTestCase):
         from photolibrary.core import watcher
         if not watcher.WATCHDOG_ENABLED:
             self.skipTest("watchdog not installed")
-        self.wait_until(lambda: self.window.watcher is not None and self.window.watcher.running, message="watcher")
+        self.wait_until(lambda: self.window.watchers and self.window.watchers[0].running, message="watcher")
         self.settle(1.3)  # past the watcher's start-up grace period
         self.write_photo(self.library / "2026-2" / "ARRIVED.jpg", datetime(2026, 2, 20, 8, 0))
         self.wait_until(lambda: "ARRIVED.jpg" in self.names, timeout=20, message="new photo to appear")
+
+
+class MultiFolderTests(WindowTestCase):
+    def names_now(self):
+        return sorted(item.name for item in self.window.model.items)
+
+    def test_add_browse_and_remove_a_second_folder(self):
+        from datetime import datetime
+        drive = self.make_library("Drive")
+        self.write_photo(drive / "2026-1" / "DRIVE_JAN.jpg", datetime(2026, 1, 20, 12))
+        self.write_photo(drive / "Family" / "DRIVE_FAM.jpg", datetime(2024, 6, 1, 12))
+        window = self.window
+
+        # Overlapping folders are refused with an explanation.
+        with patch("photolibrary.ui.main_window.QMessageBox.information") as told:
+            self.assertFalse(window.add_library_folder(self.library / "2026-1"))
+            told.assert_called_once()
+
+        self.assertTrue(window.add_library_folder(drive))
+        self.wait_until(lambda: len(window.model.items) == 28 and not window.scanning, timeout=20,
+                        message="second folder indexed")
+        sidebar = window.sidebar
+        self.wait_until(lambda: sidebar.folders_header.rowCount() == 2, message="Folders section")
+        self.assertEqual(window.folder_status.toolTip().splitlines(), [str(self.library), str(drive.resolve())])
+
+        # Both folders have a "2026-1" album; they are listed separately and named by folder.
+        labels = [sidebar.albums_header.child(row).text() for row in range(sidebar.albums_header.rowCount())]
+        self.assertIn("2026-1 — Drive", labels)
+        self.assertIn("Family", labels)
+
+        sidebar.select_scope("all", str(drive.resolve()))
+        self.wait_until(lambda: self.names_now() == ["DRIVE_FAM.jpg", "DRIVE_JAN.jpg"], message="folder scope")
+        sidebar.select_album("2026-1", str(drive.resolve()))
+        self.wait_until(lambda: self.names_now() == ["DRIVE_JAN.jpg"], message="drive album")
+
+        window.remove_folder(drive.resolve(), confirm=False)
+        self.wait_until(lambda: len(window.model.items) == self.expected_total and sidebar.scope == ("all", None, None),
+                        timeout=20, message="folder removed")
+        self.wait_until(lambda: sidebar.folders_header.model() is None, message="Folders section hidden")
+        self.assertEqual(window.settings.library_folders, [self.library.resolve()])
+        self.assertTrue((drive / "Family" / "DRIVE_FAM.jpg").exists())
+        self.wait_until(lambda: json.loads(self.config_file.read_text()).get("library_folders")
+                        == [str(self.library.resolve())], message="settings saved")
+
+
+class PaintingTests(WindowTestCase):
+    def test_painters_are_ended_even_if_the_frame_lives_on(self):
+        """A paint frame kept alive (as a stack snapshot can) must not leave its QPainter open."""
+        import sys
+        seen = []
+
+        def profile(frame, event, _arg):
+            if event == "return" and frame.f_code.co_name == "paintEvent" and "painter" in frame.f_locals:
+                seen.append(frame.f_locals["painter"].isActive())
+
+        sys.setprofile(profile)
+        try:
+            self.window.view.viewport().repaint()
+            self.window.open_current() if self.window.view.currentIndex().isValid() else None
+        finally:
+            sys.setprofile(None)
+        self.assertTrue(seen, "no paintEvent ran")
+        self.assertFalse(any(seen), "a painter was still active when paintEvent returned")
+
+
+class HiddenAlbumWindowTests(WindowTestCase):
+    def test_hide_and_show_an_album(self):
+        window, sidebar = self.window, self.window.sidebar
+        root = str(self.library.resolve())
+        window.set_album_hidden(root, "2026-2", True)
+        self.wait_until(lambda: len(window.model.items) == self.expected_total - 12, message="album hidden")
+        self.assertFalse(any(name.startswith("FEB_") for name in self.names))
+        self.wait_until(lambda: sidebar.hidden_header.rowCount() == 1, message="Hidden Albums section")
+        self.assertEqual(sidebar._library_items["all"].data(CountRole), self.expected_total - 12)
+        self.assertTrue(sidebar.is_hidden(root, "2026-2"))
+
+        # The status line counts what All Photos shows, and says how many are hidden.
+        shown = self.expected_total - 12
+        self.wait_until(lambda: window.ready_text.startswith(f"Library ready  ·  {shown} items (12 hidden)"),
+                        message="ready text before rescan")
+        self.assertIn("Hid “2026-2”", window.status.text())  # the newer message isn't overwritten
+        window.start_indexing()
+        self.wait_until(lambda: not window.scanning and window.status.text().startswith(
+            f"Library ready  ·  {shown} items (12 hidden)"), timeout=20, message="ready text after rescan")
+
+        # The hidden album still opens from the sidebar.
+        sidebar.select_album("2026-2")
+        self.wait_until(lambda: len(window.model.items) == 12, message="hidden album opened")
+        sidebar.select_scope("all")
+        self.wait_until(lambda: len(window.model.items) == self.expected_total - 12, message="back to All Photos")
+
+        window.set_album_hidden(root, "2026-2", False)
+        self.wait_until(lambda: len(window.model.items) == self.expected_total, message="album shown again")
+        self.wait_until(lambda: sidebar.hidden_header.model() is None, message="Hidden Albums section gone")
+        self.wait_until(lambda: window.ready_text.startswith(f"Library ready  ·  {self.expected_total} items  ·")
+                        or window.ready_text == f"Library ready  ·  {self.expected_total} items",
+                        message="ready text without hidden albums")
+        self.wait_until(lambda: json.loads(self.config_file.read_text()).get("hidden_albums") == [],
+                        message="settings saved")

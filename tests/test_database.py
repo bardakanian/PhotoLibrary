@@ -174,7 +174,7 @@ class SettingsTests(TempAppTestCase):
         self.config_file.write_text(json.dumps({"library_folder": str(self.root), "legacy": 42}))
         store = SettingsStore()
         loaded = store.load()
-        self.assertEqual(loaded.library_folder, self.root)
+        self.assertEqual(loaded.library_folders, [self.root])  # read from the older single-folder key
         loaded.theme, loaded.zoom, loaded.view_mode, loaded.time_format = "dark", 200, "months", "12"
         loaded.sort_order = "oldest"
         loaded.watch_folder = False
@@ -193,7 +193,7 @@ class SettingsTests(TempAppTestCase):
             "time_format": "36", "sort_order": "sideways",
         }))
         loaded = SettingsStore().load()
-        self.assertEqual((loaded.library_folder, loaded.theme, loaded.view_mode), (None, "system", "all"))
+        self.assertEqual((loaded.theme, loaded.view_mode), ("system", "all"))
         self.assertEqual(loaded.zoom, AppSettings().zoom)
         self.assertEqual((loaded.time_format, loaded.sort_order), ("system", "newest"))
 

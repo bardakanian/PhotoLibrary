@@ -1,7 +1,7 @@
 # Photo Library
 
-A fast, private desktop library for the photos and videos in one folder, built with
-PySide6. Pick a folder and browse everything in it newest first, grouped by month, in
+A fast, private desktop library for the photos and videos in your folders, built with
+PySide6. Pick one or more folders and browse everything in them newest first, grouped by month, in
 the style of Apple Photos. Indexing, thumbnails and playback all happen on your
 computer. Nothing is uploaded.
 
@@ -10,11 +10,18 @@ incremental indexer) come from the On This Day app.
 
 ## Features
 
-- **Library folder** chosen once and remembered. It's indexed in the background with a
+- **Library folders** chosen once and remembered. It's indexed in the background with a
   progress bar. Every launch, and **Rescan**, picks up added, changed and deleted files.
+- **Several folders in one library:** **Add Folder** (⌘O) adds another folder, for
+  example `~/Pictures` plus a backup drive. Their photos merge into one timeline, and the
+  sidebar's **Folders** section shows each folder on its own. Remove a folder from File ▸
+  Remove Folder from Library or by right-clicking it in the sidebar. Its files stay on disk;
+  only the app's index of it is dropped. Folders can't overlap (one inside another). If a
+  folder is missing, for example an unplugged drive, its photos stay in the library and the
+  other folders keep updating.
 - **Updates by itself:** the folder is watched (FSEvents on macOS, ReadDirectoryChangesW on
   Windows), so photos you add, move between folders or delete show up a few seconds later,
-  with no ⌘R needed. A big copy is handled as one update once it finishes. Just viewing or
+  with no ⌘R needed. Every library folder is watched. A big copy is handled as one update once it finishes. Just viewing or
   playing a file never counts as a change. You can turn this off in Settings.
 - **Virtualized grid** that stays smooth with 50,000+ items. It has month section
   headers with a sticky header at the top, and a thumbnail size slider.
@@ -23,9 +30,14 @@ incremental indexer) come from the On This Day app.
 - **Live Photos:** an iPhone Live Photo (for example `IMG_4330.HEIC` plus `IMG_4330.MOV`)
   shows once, as a photo with a LIVE badge, not as a photo plus a separate 1–3 second video.
   In the viewer, **◉ LIVE** (or L) plays the motion. Moving one to the Trash takes both files.
-- **Sidebar**: All Photos, Photos and Videos with counts, plus each top-level subfolder
-  as an **album** with its newest photo as a thumbnail. An album includes everything in
-  its nested folders. Toggle the sidebar with ⌥⌘S.
+- **Sidebar**: All Photos, Photos and Videos with counts, the library folders (when there
+  is more than one), plus each top-level subfolder as an **album** with its newest photo as
+  a thumbnail. An album includes everything in its nested folders. When two folders have an
+  album with the same name, each is labelled with its folder, as in "Trips — Backup Drive". Toggle the sidebar with ⌥⌘S.
+- **Hide an album:** right-click it in the sidebar and choose **Hide Album**. Its photos
+  disappear from All Photos, Photos, Videos, Years, Months, search, the counts and Insights,
+  and it moves to a **Hidden Albums** section. You can still open it from there. Right-click ▸
+  **Show Album in All Photos** brings it back. Nothing on disk changes.
 - **Search** (⌘F) by filename words and by date: `2023`, `May`, `May 2023`, `2023-05`,
   `2023-05-14` or `14 May 2023`. Words and dates combine (`beach 2023`). Search applies
   to the current sidebar selection. Esc clears it, and Return jumps to the results.
@@ -204,7 +216,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Action | Shortcut |
 | --- | --- |
 | **Library** | |
-| Choose library folder | ⌘O |
+| Add folder to library | ⌘O |
 | Rescan library | ⌘R |
 | Search by name or date | ⌘F (Esc clears it, Return jumps to the results) |
 | Years / Months / All Photos | ⌘1 / ⌘2 / ⌘3 |
@@ -235,7 +247,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 
 ## How it stays fast
 
-- **Indexing** (`core/indexer.py`) walks the folder with `os.scandir`. It reads
+- **Indexing** (`core/indexer.py`) walks each library folder in turn with `os.scandir`. It reads
   metadata on a thread pool, and every SQLite write happens on the indexer's single
   thread. Unchanged files (same size and modification time) are skipped.
 - **The grid** (`ui/grid_view.py`) is a custom `QAbstractItemView`. Its geometry comes
@@ -282,7 +294,8 @@ photolibrary/
 ├── core/                  No Qt imports; unit-tested
 │   ├── constants.py       Paths, supported formats, thumbnail size
 │   ├── database.py        SQLite index (WAL) and MediaRepository queries
-│   ├── indexer.py         Incremental background indexer
+│   ├── indexer.py         Incremental background indexer (one folder, or all of them in turn)
+│   ├── library_roots.py   Library folder rules: no overlaps, matching, sidebar names
 │   ├── media.py           Dates, metadata, thumbnails, open/reveal helpers
 │   ├── grouping.py        Month sections and Years/Months summaries
 │   ├── grid_layout.py     Sectioned grid geometry
@@ -324,7 +337,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 157 tests (one to two minutes). It includes headless UI tests that drive the
+The suite has 181 tests (one to two minutes). It includes headless UI tests that drive the
 real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 folder watching, theme changes, the freeze monitor and pausing thumbnail work during
 playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):

@@ -250,3 +250,17 @@ class PlaceholderDateTests(unittest.TestCase):
             os.utime(path, (made.timestamp(), made.timestamp()))
             with patch.object(media, "parse_macos_metadata_date", return_value=None):
                 self.assertEqual(media.get_capture_date(path, "image"), made)
+
+
+@unittest.skipUnless(os.name == "posix", "posix_spawn is a POSIX feature")
+class HelperProgramTests(unittest.TestCase):
+    def test_helpers_start_without_fork(self):
+        """fork() copies the whole app while holding the GIL and froze the UI ~100 ms per call."""
+        import subprocess
+        with patch.object(subprocess, "_fork_exec", side_effect=AssertionError("used fork()")):
+            result = media.run_tool(["echo", "spawned"], capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "spawned")
+
+    def test_missing_program_still_raises_os_error(self):
+        with self.assertRaises(OSError):
+            media.run_tool(["no-such-photo-tool-xyz"], capture_output=True)

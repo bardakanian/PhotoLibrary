@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
 
 from ..core.database import MediaRepository
 from ..core.grouping import LibrarySnapshot, build_snapshot
-from ..core.indexer import MediaIndexer
+from ..core.indexer import index_folders
+from ..core.library_roots import root_conflict
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
 from ..core import media as media_module
 from ..core.cache_cleanup import prune_thumbnail_cache
@@ -54,6 +55,8 @@ class MainWindow(QMainWindow):
         self.app = app
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
+        # Resolved once here, so later comparisons need no disk access on the UI thread.
+        self.settings.library_folders = [folder.resolve() for folder in self.settings.library_folders]
         self.repository = MediaRepository()
         self.theme = ThemeManager(app, self.settings.theme)
 
@@ -80,7 +83,7 @@ class MainWindow(QMainWindow):
         self.warm_pending = False   # a run was requested and hasn't finished
         self.video_playing = False
         # Folder watching: rescans automatically after files change on disk.
-        self.watcher: LibraryWatcher | None = None
+        self.watchers: list[LibraryWatcher] = []  # one per library folder
         self.pending_rescan = False
         self.watch_events = IndexEvents()
         self.watch_events.received.connect(self._folder_changed)
@@ -90,12 +93,15 @@ class MainWindow(QMainWindow):
         self.watch_retry.timeout.connect(self.start_watching)
         self.warm_id = 0
         self.ready_text = "Ready"
+        self.scan_notes: list[str] = []  # "3 new or changed" and so on, from the last scan
+        self.library_totals: tuple[int, int] | None = None  # (shown, hidden) items, from the sidebar query
         # While a scan is adding items, refresh the grid at most every few seconds.
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
         self.reload_timer.timeout.connect(self.refresh_library)
-        # What the grid shows: a library kind or an album, narrowed by the search box.
+        # What the grid shows: a library kind, one library folder or an album, narrowed by the search box.
         self.scope_kind = "all"
+        self.scope_root: str | None = None  # None: every library folder
         self.scope_album: str | None = None
         self.search_filter: SearchFilter | None = None
         self.search_timer = QTimer(self)
@@ -135,8 +141,21 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._startup)
 
     @property
-    def root_folder(self) -> Path | None:
-        return self.settings.library_folder
+    def roots(self) -> list[Path]:
+        """The library folders, in the order they were added."""
+        return list(self.settings.library_folders)
+
+    @property
+    def root_strings(self) -> list[str]:
+        return [str(folder) for folder in self.settings.library_folders]
+
+    @property
+    def hidden_albums(self) -> list[tuple[str, str]]:
+        return list(self.settings.hidden_albums)
+
+    def scope_folders(self) -> list[Path]:
+        """The folders the grid currently shows: one when a folder or album is selected, else all."""
+        return [Path(self.scope_root)] if self.scope_root else self.roots
 
     # UI construction -------------------------------------------------------
 
@@ -154,7 +173,8 @@ class MainWindow(QMainWindow):
         toolbar_layout.setSpacing(8)
         self.folder_button = QPushButton("Choose Folder")
         self.folder_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        self.folder_button.clicked.connect(self.choose_folder)
+        self.folder_button.setToolTip("Add a folder of photos and videos to the library (⌘O)")
+        self.folder_button.clicked.connect(self.add_folder)
         toolbar_layout.addWidget(self.folder_button)
         self.rescan_button = QPushButton("Rescan")
         self.rescan_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
@@ -264,7 +284,7 @@ class MainWindow(QMainWindow):
         self.viewer.top_bar_layout.addWidget(self.viewer_info_button)
         self.insights = LibraryInsightsPage(self.theme.colors)
         self.insights.back_requested.connect(self.close_insights)
-        self.insights.choose_folder_requested.connect(self.choose_folder)
+        self.insights.choose_folder_requested.connect(self.add_folder)
         self.insights.rescan_requested.connect(self.start_indexing)
         self.insights.retry_requested.connect(self.load_insights)
         self.theme.changed.connect(lambda _preference: self.insights.set_theme_colors(self.theme.colors))
@@ -274,6 +294,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.insights)
         self.sidebar = Sidebar(self.loader, self.theme)
         self.sidebar.scope_changed.connect(self.set_scope)
+        self.sidebar.add_folder_requested.connect(self.add_folder)
+        self.sidebar.hide_album_requested.connect(self.set_album_hidden)
+        self.sidebar.remove_folder_requested.connect(lambda root: self.remove_folder(Path(root)))
         self.sidebar.setVisible(self.settings.sidebar_visible)
         self.theme.changed.connect(lambda _preference: self.sidebar.tree.viewport().update())
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -314,7 +337,9 @@ class MainWindow(QMainWindow):
             return item
 
         file_menu = self.menuBar().addMenu("File")
-        action(file_menu, "Choose Library Folder…", "Ctrl+O", self.choose_folder)
+        action(file_menu, "Add Folder to Library…", "Ctrl+O", self.add_folder)
+        self.remove_folder_menu = file_menu.addMenu("Remove Folder from Library")
+        self.remove_folder_menu.aboutToShow.connect(self._fill_remove_folder_menu)
         action(file_menu, "Rescan Library", "Ctrl+R", self.start_indexing)
         file_menu.addSeparator()
         # On macOS Qt moves this into the application menu (where Settings lives on a Mac);
@@ -380,7 +405,8 @@ class MainWindow(QMainWindow):
     def _startup(self) -> None:
         self._update_folder_label()
         self.view.setFocus()
-        if self.root_folder:
+        self.sidebar.set_folders(self.root_strings)
+        if self.roots:
             self.refresh_library()
             # Every launch runs an incremental scan to pick up files changed outside the app,
             # then the folder is watched so later changes show up by themselves.
@@ -397,50 +423,126 @@ class MainWindow(QMainWindow):
             self.status.setText("Optional support unavailable: " + ", ".join(missing))
 
     def _update_folder_label(self) -> None:
-        folder = self.root_folder
-        self.folder_status.setText(str(folder) if folder else "No folder selected")
-        self.folder_status.setToolTip(str(folder) if folder else "")
-        self.folder_button.setText("Change Folder" if folder else "Choose Folder")
-        self.rescan_button.setEnabled(folder is not None and not self.scanning)
+        roots = self.roots
+        if not roots:
+            text = "No folder selected"
+        elif len(roots) == 1:
+            text = str(roots[0])
+        else:
+            text = f"{len(roots)} folders"
+        self.folder_status.setText(text)
+        self.folder_status.setToolTip("\n".join(self.root_strings))
+        self.folder_button.setText("Add Folder" if roots else "Choose Folder")
+        self.rescan_button.setEnabled(bool(roots) and not self.scanning)
 
-    def choose_folder(self) -> None:
-        initial = str(self.root_folder or Path.home() / "Pictures")
-        selected = QFileDialog.getExistingDirectory(self, "Choose Photo and Video Folder", initial)
-        if not selected:
+    def add_folder(self) -> None:
+        """Ask for a folder and add it to the library (the first one becomes the library)."""
+        initial = str(self.roots[-1].parent if self.roots else Path.home() / "Pictures")
+        title = "Add Folder to Library" if self.roots else "Choose Photo and Video Folder"
+        selected = QFileDialog.getExistingDirectory(self, title, initial)
+        if selected:
+            self.add_library_folder(Path(selected))
+
+    def add_library_folder(self, folder: Path) -> bool:
+        folder = folder.resolve()
+        problem = root_conflict(self.roots, folder)
+        if problem:
+            QMessageBox.information(self, "Can't add this folder", problem)
+            return False
+        first = not self.roots
+        self.settings.library_folders = self.roots + [folder]  # a new list: a save may be reading the old one
+        self._save_settings()
+        if first:
+            self.loader.reset()
+            self.snapshot = None
+            self.model.set_snapshot(None)
+            self.sidebar.clear_albums()
+        self._library_folders_changed()
+        self.status.setText(f"Added “{folder.name}” to the library  ·  indexing…")
+        self.start_indexing()
+        return True
+
+    def _fill_remove_folder_menu(self) -> None:
+        menu = self.remove_folder_menu
+        menu.clear()
+        for folder in self.roots:
+            menu.addAction(self.sidebar.folder_name(str(folder)),
+                           lambda folder=folder: self.remove_folder(folder)).setToolTip(str(folder))
+        if not self.roots:
+            menu.addAction("No folders").setEnabled(False)
+
+    def remove_folder(self, folder: Path, confirm: bool = True) -> None:
+        """Stop showing a folder. Its files stay where they are; only the app's index of it is dropped."""
+        folder = Path(folder)
+        if folder not in self.roots:
             return
-        folder = Path(selected)
+        if confirm:
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setWindowTitle("Remove folder from library?")
+            dialog.setText(f"Remove “{folder.name}” from the library?")
+            dialog.setInformativeText("Its photos and videos stay in the folder on disk; they just won't "
+                                      "be shown here. You can add the folder again later.")
+            remove_button = dialog.addButton("Remove", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton(QMessageBox.StandardButton.Cancel)
+            dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            dialog.exec()
+            if dialog.clickedButton() is not remove_button:
+                return
+        if self.viewer_active:
+            self.close_viewer()
+        # Stop the scan first, so it doesn't write rows for the folder after they are removed.
         self.stop_event.set()
         self.stop_warming()
-        self.settings.library_folder = folder
+        self.settings.library_folders = [root for root in self.roots if root != folder]
+        self.settings.hidden_albums = [entry for entry in self.hidden_albums if entry[0] != str(folder)]
         self._save_settings()
-        self.loader.reset()
-        self.snapshot = None
-        self.model.set_snapshot(None)
-        self.sidebar.clear_albums()
-        self.scope_kind, self.scope_album = "all", None
-        self.sidebar.select_scope("all", None, notify=False)
+        repository = self.repository
+        thread = self.index_thread
+
+        def forget():
+            if thread is not None:
+                thread.join(timeout=30)
+            return repository.remove_folder(folder)
+
+        def done(_removed):
+            self._library_folders_changed()
+            self.status.setText(f"Removed “{folder.name}” from the library")
+            if self.roots:
+                self.start_indexing()  # refreshes the totals, then warming tidies up its thumbnails
+            else:
+                self.ready_text = "Ready"
+
+        run_async(self.io_pool, forget, done,
+                  lambda error: LOGGER.error("Could not remove %s from the index", folder, exc_info=error))
+
+    def _library_folders_changed(self) -> None:
+        """Folders were added or removed: update the sidebar, labels, grid, watchers and insights."""
+        if self.scope_root is not None and Path(self.scope_root) not in self.roots:
+            self.scope_kind, self.scope_root, self.scope_album = "all", None, None
+        self.sidebar.set_folders(self.root_strings)
+        self.sidebar.select_scope(self.scope_kind, self.scope_root, self.scope_album, notify=False)
         self._update_folder_label()
         self.refresh_library(keep_position=False)
         if self.insights_active:
             self.load_insights()
-        self.start_indexing()
         self.start_watching()
 
     def _empty_action(self, action: str) -> None:
         if action == "choose":
-            self.choose_folder()
+            self.add_folder()
         elif action == "rescan":
             self.start_indexing()
         elif action == "clear_search":
             self.clear_search()
         elif action == "show_all":
-            self.sidebar.select_scope("all", None)
+            self.sidebar.select_scope("all", None, None)
 
     # Indexing -------------------------------------------------------------
 
     def start_indexing(self) -> None:
-        if self.root_folder is None:
-            self.choose_folder()
+        if not self.roots:
+            self.add_folder()
             return
         if self.index_thread and self.index_thread.is_alive():
             self.pending_index_start = True
@@ -452,8 +554,9 @@ class MainWindow(QMainWindow):
         self.stop_warming()  # leave the disk and CPU to the scan; warming restarts afterwards
         self.active_scan_id += 1
         self.stop_event = threading.Event()
-        indexer = MediaIndexer(self.root_folder, self.stop_event, self.active_scan_id, self.index_events.received.emit)
-        self.index_thread = threading.Thread(target=indexer.run, daemon=True, name="media-indexer")
+        roots, stop, scan_id, emit = self.roots, self.stop_event, self.active_scan_id, self.index_events.received.emit
+        self.index_thread = threading.Thread(target=lambda: index_folders(roots, stop, scan_id, emit),
+                                             daemon=True, name="media-indexer")
         self.index_thread.start()
 
     def _handle_index_event(self, event: dict) -> None:
@@ -471,8 +574,12 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, max(1, event["total"]))
         elif event_type == "scan_progress":
             self.progress.setValue(event["processed"])
+            folder = ""
+            if event.get("folder_count", 1) > 1:
+                folder = (f"  ·  folder {event['folder_number']} of {event['folder_count']} "
+                          f"({Path(event['folder']).name})")
             self.status.setText(
-                f"Indexing  ·  {event['processed']:,} of {event['total']:,}  ·  "
+                f"Indexing{folder}  ·  {event['processed']:,} of {event['total']:,}  ·  "
                 f"{event['updated']:,} new or changed"
             )
         elif event_type == "batch_committed":
@@ -491,25 +598,36 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self.start_indexing)
             self._update_folder_label()
             if event_type == "scan_complete":
-                parts = [f"{event['total_indexed']:,} items"]
+                parts = []
                 if event["updated"]:
                     parts.append(f"{event['updated']:,} new or changed")
                 if event["deleted"]:
                     parts.append(f"{event['deleted']:,} removed")
                 if event["errors"]:
                     parts.append(f"{event['errors']:,} unreadable")
-                self.ready_text = "Library ready  ·  " + "  ·  ".join(parts)
-                self.status.setText(self.ready_text)
+                unavailable = event.get("missing_folders", []) + event.get("failed_folders", [])
+                if unavailable:
+                    names = ", ".join(f"“{Path(folder).name}”" for folder in unavailable)
+                    parts.append(f"not found: {names}" if not event.get("failed_folders") else f"couldn't scan: {names}")
+                self.scan_notes = parts
+                # The scan counts every file; the sidebar query then corrects this for hidden albums.
+                self.library_totals = None if self.hidden_albums else (event["total_indexed"], 0)
+                self._update_ready_text(event["total_indexed"], show=True)
                 self.reload_timer.stop()
                 if event["updated"] or event["deleted"] or not self.snapshot:
                     self.refresh_library()
                 else:
+                    self.reload_sidebar()
                     self._update_empty_state()
                 if self.insights_active:
                     self.load_insights()
                 self.start_warming()
             elif event_type == "scan_cancelled":
                 self.status.setText("Indexing cancelled")
+            elif event.get("missing_folders") and not event.get("failed_folders"):
+                # Every folder is missing (say, an unplugged drive): keep showing what was indexed.
+                self.status.setText("Library folder not found  ·  showing what was indexed before")
+                self._update_empty_state()
             else:
                 self.status.setText("Indexing failed")
                 LOGGER.error("Indexing failed: %s", event.get("message", "Unknown error"))
@@ -522,7 +640,7 @@ class MainWindow(QMainWindow):
     def query_arguments(self) -> dict:
         search = self.search_filter if self.search_filter and not self.search_filter.is_empty else None
         return {"kind": self.scope_kind, "album": self.scope_album, "search": search,
-                "oldest_first": self.settings.sort_order == "oldest"}
+                "oldest_first": self.settings.sort_order == "oldest", "hidden": self.hidden_albums}
 
     def refresh_library(self, keep_position: bool = True) -> None:
         """Reload the grid and the sidebar's counts and albums."""
@@ -530,10 +648,10 @@ class MainWindow(QMainWindow):
         self.reload_sidebar()
 
     def reload_library(self, keep_position: bool = True) -> None:
-        folder = self.root_folder
+        folders = self.scope_folders()
         self.query_request_id += 1
         request_id = self.query_request_id
-        if folder is None:
+        if not folders:
             self._apply_snapshot(None, request_id, keep_position)
             return
         arguments = self.query_arguments()
@@ -541,35 +659,79 @@ class MainWindow(QMainWindow):
         self.query_pool.clear()
         run_async(
             self.query_pool,
-            lambda: build_snapshot(repository.query(folder, **arguments)),
+            lambda: build_snapshot(repository.query(folders, **arguments)),
             lambda snapshot: self._apply_snapshot(snapshot, request_id, keep_position),
             lambda error: self._query_failed(error, request_id),
         )
 
     def reload_sidebar(self) -> None:
-        folder = self.root_folder
-        if folder is None:
+        roots = self.roots
+        if not roots:
             self.sidebar.clear_albums()
             return
         repository = self.repository
+        hidden = self.hidden_albums
 
         def load():
-            return repository.counts(folder), repository.albums(folder)
+            per_folder = ({str(root): repository.counts(root, hidden)["all"] for root in roots}
+                          if len(roots) > 1 else {})
+            everything = repository.counts(roots)["all"] if hidden else None
+            return repository.counts(roots, hidden), per_folder, repository.albums(roots), everything
 
         def apply(result):
-            if folder != self.root_folder:
+            if roots != self.roots or hidden != self.hidden_albums:
                 return
-            counts, albums = result
+            counts, per_folder, albums, everything = result
+            shown = counts.get("all", 0)
+            self.library_totals = (shown, everything - shown if everything is not None else 0)
+            self._update_ready_text()
             self.sidebar.set_counts(counts)
-            self.sidebar.set_albums(albums)
+            self.sidebar.set_folders(self.root_strings, per_folder)
+            self.sidebar.set_albums(albums, hidden)
 
         run_async(self.io_pool, load, apply, lambda error: LOGGER.error("Could not load albums", exc_info=error))
 
-    def set_scope(self, kind: str, album: str | None) -> None:
-        """Show a library kind (all, photos, videos) or one album."""
+    def _update_ready_text(self, fallback_total: int = 0, show: bool = False) -> None:
+        """"Library ready · 59 items (11 hidden) · …": counts what All Photos shows.
+
+        Updates the status line only if it is showing the ready text (or `show` is set), so a
+        newer message (say, "Hid Trips") isn't overwritten.
+        """
+        if not self.scan_notes and not self.ready_text.startswith("Library ready") and not show:
+            return  # no scan has finished yet
+        shown, hidden = self.library_totals or (fallback_total, 0)
+        count = f"{shown:,} item{'s' if shown != 1 else ''}" + (f" ({hidden:,} hidden)" if hidden else "")
+        showing = show or self.status.text().startswith("Library ready")
+        self.ready_text = "Library ready  ·  " + "  ·  ".join([count, *self.scan_notes])
+        if showing:
+            self.status.setText(self.ready_text)
+
+    def set_album_hidden(self, root: str, album: str, hide: bool = True) -> None:
+        """Hide an album from All Photos, Photos, Videos, search, counts and Insights (or show it again).
+
+        Nothing on disk changes, and the album itself still opens from Hidden Albums in the sidebar.
+        """
+        pair = (str(root), album)
+        if hide == (pair in self.hidden_albums):
+            return
+        # A new list: a background settings save may be reading the old one.
+        self.settings.hidden_albums = (self.hidden_albums + [pair] if hide
+                                       else [entry for entry in self.hidden_albums if entry != pair])
+        self._save_settings()
+        if hide:
+            self.status.setText(f"Hid “{album}”  ·  its photos no longer appear in All Photos. "
+                                "Show it again from Hidden Albums in the sidebar.")
+        else:
+            self.status.setText(f"“{album}” is back in All Photos")
+        self.refresh_library()
+        if self.insights_active:
+            self.load_insights()
+
+    def set_scope(self, kind: str, root: str | None = None, album: str | None = None) -> None:
+        """Show a library kind (all, photos, videos), one library folder, or one album of a folder."""
         if self.viewer_active:
             self.close_viewer()
-        self.scope_kind, self.scope_album = kind, album
+        self.scope_kind, self.scope_root, self.scope_album = kind, root, album
         self.reload_library(keep_position=False)
 
     # Search --------------------------------------------------------------
@@ -667,7 +829,7 @@ class MainWindow(QMainWindow):
             self.view.restore_anchor(row, delta)
 
     def _update_empty_state(self) -> None:
-        if self.root_folder is None:
+        if not self.roots:
             self.grid_page.show_empty(
                 "Choose your photo library",
                 "Pick a folder with photos and videos. It's indexed on this Mac only and nothing is uploaded.",
@@ -675,7 +837,7 @@ class MainWindow(QMainWindow):
         elif self.model.rowCount() == 0:
             searching = self.search_filter is not None and not self.search_filter.is_empty
             if self.snapshot is None or (self.scanning and not searching and self.scope_album is None
-                                         and self.scope_kind == "all"):
+                                         and self.scope_root is None and self.scope_kind == "all"):
                 self.grid_page.show_empty("Indexing your library…",
                                           "Photos and videos will appear here as they are found.")
             elif searching:
@@ -686,6 +848,10 @@ class MainWindow(QMainWindow):
             elif self.scope_album is not None:
                 self.grid_page.show_empty("This album is empty",
                                           f"There are no photos or videos in “{self.scope_album}” any more.",
+                                          "Show All Photos", "show_all")
+            elif self.scope_root is not None:
+                self.grid_page.show_empty("No photos or videos",
+                                          f"“{self.scope_label}” doesn't contain any supported media yet.",
                                           "Show All Photos", "show_all")
             elif self.scope_kind != "all":
                 noun = "videos" if self.scope_kind == "videos" else "photos"
@@ -698,17 +864,19 @@ class MainWindow(QMainWindow):
         else:
             self.grid_page.show_grid()
         count = len(self.model.items)
-        if self.root_folder is not None and not self.scanning:
+        if self.roots and not self.scanning:
             noun = "item" if count == 1 else "items"
             selected = sum(r.height() for r in self.view.selectionModel().selection()) if self.model.mode == "all" else 0
             suffix = f"  ·  {selected:,} selected" if selected > 1 else ""
             self.folder_status.setText(f"{self.scope_label}  ·  {count:,} {noun}{suffix}")
-            self.folder_status.setToolTip(str(self.root_folder))
+            self.folder_status.setToolTip("\n".join(self.root_strings))
 
     @property
     def scope_label(self) -> str:
         if self.scope_album is not None:
             return self.scope_album
+        if self.scope_root is not None:
+            return self.sidebar.folder_name(self.scope_root)
         return {"photos": "Photos", "videos": "Videos"}.get(self.scope_kind, "All Photos")
 
     # View modes and zoom -------------------------------------------------
@@ -854,28 +1022,28 @@ class MainWindow(QMainWindow):
     # Folder watching -------------------------------------------------------
 
     def start_watching(self) -> None:
-        """Watch the library folder for changes (if enabled), replacing any earlier watcher."""
+        """Watch every library folder for changes (if enabled), replacing any earlier watchers."""
         self.stop_watching()
-        folder = self.root_folder
-        if folder is None or not self.settings.watch_folder:
+        if not self.roots or not self.settings.watch_folder:
             return
         emit = self.watch_events.received.emit
-        watcher = LibraryWatcher(folder, lambda: emit(None))
-        if watcher.start():
-            self.watcher = watcher
-        else:
-            # Usually an unplugged drive; try again in a while.
-            self.watch_retry.start()
+        for folder in self.roots:
+            watcher = LibraryWatcher(folder, lambda: emit(None))
+            if watcher.start():
+                self.watchers.append(watcher)
+            else:
+                # Usually an unplugged drive; try them all again in a while.
+                self.watch_retry.start()
 
     def stop_watching(self) -> None:
         self.watch_retry.stop()
-        if self.watcher is not None:
-            self.watcher.stop()
-            self.watcher = None
+        for watcher in self.watchers:
+            watcher.stop()
+        self.watchers = []
 
     def _folder_changed(self, _payload=None) -> None:
-        """Files changed in the library folder: run the (incremental) scan once things settle."""
-        if self.root_folder is None:
+        """Files changed in a library folder: run the (incremental) scan once things settle."""
+        if not self.roots:
             return
         if self.scanning:
             self.pending_rescan = True
@@ -885,8 +1053,7 @@ class MainWindow(QMainWindow):
 
     def _move_to_trash(self, path: Path) -> bool:
         """Runs on a worker thread. The watcher is told first, so the app's own change isn't a "new" change."""
-        watcher = self.watcher
-        if watcher is not None:
+        for watcher in list(self.watchers):
             watcher.ignore([path])
         return QFile.moveToTrash(str(path))
 
@@ -897,8 +1064,8 @@ class MainWindow(QMainWindow):
 
         While a video plays this only notes the request; it runs once playback pauses or stops.
         """
-        folder = self.root_folder
-        if folder is None:
+        folders = self.roots
+        if not folders:
             return
         self.stop_warming()
         self.warm_pending = True
@@ -912,7 +1079,7 @@ class MainWindow(QMainWindow):
 
         def run():
             try:
-                items = repository.query(folder)
+                items = repository.query(folders)
                 result = warm_thumbnails(
                     items, stop, lambda done, total: emit({"type": "progress", "id": warm_id, "done": done,
                                                            "total": total}))
@@ -1014,17 +1181,17 @@ class MainWindow(QMainWindow):
         """Query the index on a worker thread; only the latest request's result is shown."""
         self.insights_request_id += 1
         request_id = self.insights_request_id
-        folder = self.root_folder
-        if folder is None:
+        folders = self.roots
+        if not folders:
             self.insights.set_folder_name("")
             self.insights.show_no_folder()
             return
-        self.insights.set_folder_name(folder.name)
+        self.insights.set_folder_name(folders[0].name if len(folders) == 1 else f"{len(folders)} folders")
         self.insights.show_loading()
         repository = self.repository
 
         def done(result):
-            if request_id == self.insights_request_id and folder == self.root_folder:
+            if request_id == self.insights_request_id and folders == self.roots:
                 self.insights.set_result(result)
 
         def failed(error):
@@ -1032,7 +1199,8 @@ class MainWindow(QMainWindow):
                 LOGGER.error("Could not load Library Insights", exc_info=error)
                 self.insights.show_error()
 
-        run_async(self.io_pool, lambda: repository.library_analytics(folder), done, failed)
+        hidden = self.hidden_albums
+        run_async(self.io_pool, lambda: repository.library_analytics(folders, hidden), done, failed)
 
     # Selection, info and trash ---------------------------------------------
 
@@ -1117,8 +1285,8 @@ class MainWindow(QMainWindow):
 
     def move_to_trash(self) -> None:
         items = self.target_items()
-        folder = self.root_folder
-        if not items or folder is None:
+        folders = self.roots
+        if not items or not folders:
             self.status.setText("Select photos or videos to move to the Trash")
             return
         if self.trash_in_progress:
@@ -1142,7 +1310,7 @@ class MainWindow(QMainWindow):
         if live:
             live_note = (" Its Live Photo video is moved too." if len(items) == 1 else
                          f" The videos of {live:,} Live Photo{'s' if live != 1 else ''} are moved too.")
-        dialog.setInformativeText("The original files are moved out of your library folder."
+        dialog.setInformativeText("The original files are moved out of your library."
                                   f"{live_note} You can restore them from the Trash.")
         move_button = dialog.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
         dialog.addButton(QMessageBox.StandardButton.Cancel)
@@ -1160,7 +1328,7 @@ class MainWindow(QMainWindow):
         repository = self.repository
         run_async(
             self.io_pool,
-            lambda: trash_items(folder, items, lambda path: self._move_to_trash(path), repository),
+            lambda: trash_items(folders, items, lambda path: self._move_to_trash(path), repository),
             lambda result: self._trash_finished(result, first_row),
             self._trash_failed,
         )

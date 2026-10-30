@@ -1,6 +1,8 @@
+import functools
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,6 +41,25 @@ _THUMB_BACKGROUND = (24, 26, 30)
 # A console program started from a windowless app (pythonw, the Windows launcher) gets a
 # console window of its own; this keeps ffmpeg from flashing one up for every video.
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+
+
+@functools.cache
+def _tool_path(name: str) -> str:
+    return shutil.which(name) or name
+
+
+def run_tool(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run for helper programs (mdls, ffmpeg) without stalling the UI.
+
+    By default Python starts a program by fork()ing the whole app while holding the GIL,
+    which froze the UI for about 100 ms per call during scans. Given a full program path and
+    close_fds=False, it uses posix_spawn instead (about 1 ms). Leaking file descriptors isn't
+    a concern: Python creates them non-inheritable (PEP 446).
+    """
+    if os.name == "posix":
+        args = [_tool_path(args[0]), *args[1:]]
+        kwargs.setdefault("close_fds", False)
+    return subprocess.run(args, **kwargs)
 
 
 def media_type_for_path(path: Path) -> str:
@@ -99,7 +120,7 @@ def parse_macos_metadata_date(path: Path) -> datetime | None:
     if sys.platform != "darwin":
         return None
     try:
-        result = subprocess.run(
+        result = run_tool(
             ["mdls", "-raw", *(arg for field in _SPOTLIGHT_FIELDS for arg in ("-name", field)), str(path)],
             capture_output=True, text=True, timeout=5, check=False,
         )
@@ -228,7 +249,7 @@ def read_video_metadata(path: Path) -> MediaMetadata:
     if not FFMPEG_ENABLED:
         return MediaMetadata(None)
     try:
-        result = subprocess.run(
+        result = run_tool(
             [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
             capture_output=True, text=True, timeout=10, check=False, errors="replace", **_NO_WINDOW,
         )
@@ -329,7 +350,7 @@ def _video_thumbnail(source: Path, target: Path, edge: int = THUMBNAIL_EDGE) -> 
     # produce nothing, so fall back to the very first frame.
     for seek in (["-ss", "1"], []):
         try:
-            subprocess.run([
+            run_tool([
                 imageio_ffmpeg.get_ffmpeg_exe(), "-y", *seek, "-i", str(source),
                 "-frames:v", "1", "-vf", scale, "-q:v", "3", str(target),
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False, **_NO_WINDOW)

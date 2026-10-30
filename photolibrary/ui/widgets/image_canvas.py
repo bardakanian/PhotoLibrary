@@ -148,15 +148,18 @@ class ImageCanvas(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), BACKGROUND)
-        if self._pixmap is not None and self._state is not None:
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            x, y, width, height = self._state.target_rect()
-            painter.drawPixmap(QRectF(x, y, width, height), self._pixmap, QRectF(self._pixmap.rect()))
-        elif self._message:
-            painter.setPen(QColor("#A6ADBA"))
-            painter.setFont(self._message_font)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+        try:  # always end it; see MediaGridView.paintEvent
+            painter.fillRect(self.rect(), BACKGROUND)
+            if self._pixmap is not None and self._state is not None:
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                x, y, width, height = self._state.target_rect()
+                painter.drawPixmap(QRectF(x, y, width, height), self._pixmap, QRectF(self._pixmap.rect()))
+            elif self._message:
+                painter.setPen(QColor("#A6ADBA"))
+                painter.setFont(self._message_font)
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+        finally:
+            painter.end()
 
     def wheelEvent(self, event) -> None:
         if self._state is None:

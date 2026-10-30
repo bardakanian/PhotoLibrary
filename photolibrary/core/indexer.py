@@ -1,3 +1,4 @@
+import logging
 import os
 import sqlite3
 import threading
@@ -5,13 +6,14 @@ import time
 from datetime import datetime
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Sequence
 
 from .constants import BATCH_COMMIT_SIZE, METADATA_VERSION, SUPPORTED_EXTENSIONS
 from .database import VISIBLE, open_database
 from .live_photos import PairingRow, pair_live_photos
 from .media import HEIC_ENABLED, media_type_for_path, read_metadata
 
+LOGGER = logging.getLogger(__name__)
 METADATA_WORKERS = min(8, os.cpu_count() or 4)
 PROGRESS_INTERVAL = 0.2  # seconds between progress events
 
@@ -97,6 +99,11 @@ class MediaIndexer:
         # disk or subprocesses, so it runs on worker threads. SQLite writes stay on this thread.
         executor = ThreadPoolExecutor(max_workers=METADATA_WORKERS, thread_name_prefix="media-metadata")
         try:
+            if not os.path.isdir(self.folder_root):
+                # An unplugged drive or a renamed folder: keep its index rather than treating
+                # every file as deleted.
+                self.send("scan_error", message=f"Folder not found: {self.folder_root}", missing=True)
+                return
             connection = open_database()
             cached = {
                 row[0]: (row[1], row[2], row[3], row[4])
@@ -233,3 +240,54 @@ class MediaIndexer:
                 except sqlite3.Error:
                     pass
                 connection.close()
+
+
+COMPLETE_TOTALS = ("scanned", "updated", "unchanged", "deleted", "errors", "total_indexed", "total_videos",
+                   "live_photos")
+
+
+def index_folders(folders: Sequence[Path], stop_event: threading.Event, scan_id: int,
+                  emit: Callable[[dict], None]) -> None:
+    """Scan several library folders one after another and report them as one scan.
+
+    Progress events carry `folder`, `folder_number` and `folder_count`. A folder that is missing
+    or fails doesn't stop the others: the final `scan_complete` adds up the folders that worked
+    and lists the rest in `missing_folders` and `failed_folders`. Only when no folder could be
+    scanned does it end with `scan_error`.
+    """
+    def send(event_type: str, **payload: object) -> None:
+        emit({"type": event_type, "scan_id": scan_id, **payload})
+
+    send("scan_started")
+    totals = dict.fromkeys(COMPLETE_TOTALS, 0)
+    missing: list[str] = []
+    failed: list[str] = []
+    for number, folder in enumerate(folders, start=1):
+        outcome: dict = {}
+
+        def relay(event: dict, folder=folder, number=number) -> None:
+            kind = event["type"]
+            if kind == "scan_started":
+                return
+            if kind in {"scan_complete", "scan_cancelled", "scan_error"}:
+                outcome.update(event)
+                return
+            emit({**event, "folder": str(folder), "folder_number": number, "folder_count": len(folders)})
+
+        MediaIndexer(folder, stop_event, scan_id, relay).run()
+        if outcome.get("type") == "scan_cancelled" or stop_event.is_set():
+            send("scan_cancelled")
+            return
+        if outcome.get("type") == "scan_complete":
+            for key in COMPLETE_TOTALS:
+                totals[key] += outcome[key]
+        elif outcome.get("missing"):
+            missing.append(str(folder))
+        else:
+            LOGGER.error("Indexing %s failed: %s", folder, outcome.get("message"))
+            failed.append(str(folder))
+    if folders and len(missing) + len(failed) == len(folders):
+        send("scan_error", message="No library folder could be scanned", missing_folders=missing,
+             failed_folders=failed)
+        return
+    send("scan_complete", **totals, missing_folders=missing, failed_folders=failed)

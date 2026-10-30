@@ -26,13 +26,39 @@ _IDLE_FUNCTIONS = {"wait", "_wait_for_tstate_lock", "get", "acquire", "sleep", "
                    "read_directory_changes", "accept", "recv"}
 
 
+def _snapshot_stacks(own_id: int) -> dict[int, traceback.StackSummary]:
+    """Every other thread's stack as plain summaries, without keeping any frame alive.
+
+    A live frame held by this thread keeps that function's locals alive after it returns.
+    For the UI thread that can be a QPainter in the middle of a paint, which then never ends
+    and crashes Qt. So no file access (source lines are looked up later) and no frame
+    references survive this function.
+    """
+    frames = sys._current_frames()
+    stacks = {}
+    try:
+        for ident, frame in frames.items():
+            if ident == own_id:
+                continue
+            # By hand: StackSummary.extract stats every source file even without line lookups.
+            entries = []
+            while frame is not None:
+                code = frame.f_code
+                entries.append(traceback.FrameSummary(code.co_filename, frame.f_lineno, code.co_name,
+                                                      lookup_line=False))
+                frame = frame.f_back
+            entries.reverse()
+            stacks[ident] = traceback.StackSummary.from_list(entries)
+    finally:
+        frame = None
+        frames.clear()
+    return stacks
+
+
 def _thread_dump(main_id: int, own_id: int) -> str:
     names = {thread.ident: thread.name for thread in threading.enumerate()}
     sections = []
-    for ident, frame in sys._current_frames().items():
-        if ident == own_id:
-            continue
-        stack = traceback.extract_stack(frame)
+    for ident, stack in _snapshot_stacks(own_id).items():
         if ident != main_id and stack and stack[-1].name in _IDLE_FUNCTIONS:
             continue
         name = names.get(ident, f"thread {ident}")

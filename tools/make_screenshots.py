@@ -137,14 +137,14 @@ def main() -> None:
     def prepare_search():
         window.theme.apply("light")
         window.set_view_mode("all")
-        window.sidebar.select_scope("all", "Trips")
+        window.sidebar.select_album("Trips")
         window.search_box.setText("2025")
         window.search_timer.stop()
         window._apply_search()
 
     def prepare_viewer():
         window.clear_search()
-        window.sidebar.select_scope("all", None)
+        window.sidebar.select_scope("all")
 
     def open_viewer():
         items = window.model.items
@@ -158,7 +158,7 @@ def main() -> None:
     then(lambda: save(window, "months-dark"))
     then(prepare_search)
     then(lambda: save(window, "search"))
-    then(lambda: (window.clear_search(), window.sidebar.select_scope("all", None), window.show_insights()))
+    then(lambda: (window.clear_search(), window.sidebar.select_scope("all"), window.show_insights()))
     then(lambda: save(window, "insights"))
     then(window.close_insights)
     then(prepare_viewer)
