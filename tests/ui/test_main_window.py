@@ -165,6 +165,8 @@ class FilterTests(WindowTestCase):
         self.assertEqual([section.title for section in self.window.model.sections], ["January 2026"])
 
     def test_sort_order_toggle(self):
+        self.window.resize(1600, 800)  # full toolbar labels even with the offscreen platform's wide glyphs
+        self.settle(0.1)
         self.window.sidebar.select_album("2026-2")
         self.wait_until(lambda: len(self.window.model.items) == 12, message="album")
         self.assertEqual(self.names[0], "FEB_11.jpg")
@@ -321,7 +323,10 @@ class HiddenAlbumWindowTests(WindowTestCase):
 class ToolbarFitTests(WindowTestCase):
     def test_view_buttons_are_never_squeezed(self):
         window = self.window
-        for width in (900, 1000, 1200, 1600):
+        # The compact toolbar's width depends on the font: Qt's offscreen platform on Windows has no
+        # real fonts and draws placeholder glyphs, which need about 1,060 px.
+        narrowest = max(900, window.compact_toolbar_width())
+        for width in sorted({narrowest, max(narrowest, 1000), max(narrowest, 1200), 1600}):
             window.resize(width, 800)
             self.settle(0.1)
             for mode, button in window.mode_buttons.items():
@@ -329,7 +334,7 @@ class ToolbarFitTests(WindowTestCase):
             self.assertLessEqual(window.toolbar.layout().minimumSize().width(), window.width())
         # With room to spare the labels come back.
         self.assertEqual(window.rescan_button.text(), "Rescan")
-        window.resize(900, 800)
+        window.resize(narrowest, 800)
         self.settle(0.1)
         self.assertEqual(window.rescan_button.text(), "")
         window.set_sort_order("oldest")

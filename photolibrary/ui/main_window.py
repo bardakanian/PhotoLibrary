@@ -943,18 +943,30 @@ class MainWindow(QMainWindow):
 
         Otherwise Qt squeezes every button below its size and clips the labels.
         """
+        if self.width() < self._toolbar_width(compact=False):  # the toolbar spans the window
+            self._toolbar_width(compact=True)
+
+    def compact_toolbar_width(self) -> int:
+        """Width the toolbar needs with icon-only buttons; below this Qt has to squeeze it.
+
+        Depends on the font: Qt's offscreen platform on Windows (the UI tests) draws much wider text.
+        """
+        width = self._toolbar_width(compact=True)
+        self._fit_toolbar()
+        return width
+
+    def _toolbar_width(self, compact: bool) -> int:
+        """Show the full or icon-only labels and return the toolbar's minimum width with them."""
         oldest = self.settings.sort_order == "oldest"
         full = (self.folder_label, "Rescan", "↑  Oldest First" if oldest else "↓  Newest First")
         buttons = (self.folder_button, self.rescan_button, self.sort_button)
-        for button, text in zip(buttons, full):
+        for button, text in zip(buttons, ("", "", "↑" if oldest else "↓") if compact else full):
             button.setText(text)
         for button, text in zip(buttons[:2], full):
             button.setAccessibleName(text)  # still named for VoiceOver when only the icon shows
         layout = self.toolbar.layout()
         layout.invalidate()
-        if self.width() < layout.minimumSize().width():  # the toolbar spans the window
-            for button, text in zip(buttons, ("", "", "↑" if oldest else "↓")):
-                button.setText(text)
+        return layout.minimumSize().width()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

@@ -53,12 +53,14 @@ def root_for(path: Path | str, roots: Iterable[Path | str]) -> Path | None:
 
 def display_names(roots: Sequence[Path | str]) -> dict[str, str]:
     """Short names for the sidebar: the folder name, plus its parent when two folders share a name."""
-    paths = [Path(root) for root in roots]
-    names = {str(path): path.name or str(path) for path in paths}
+    # Keyed by each root exactly as given, which is how the sidebar looks names up (str(Path(...))
+    # would turn "/Volumes/..." into "\Volumes\..." on Windows).
+    paths = {str(root): Path(root) for root in roots}
+    names = {key: path.name or key for key, path in paths.items()}
     counts: dict[str, int] = {}
     for name in names.values():
         counts[name] = counts.get(name, 0) + 1
-    for path in paths:
-        if counts[names[str(path)]] > 1:
-            names[str(path)] = f"{path.name} ({path.parent.name or path.parent})"
+    for key, path in paths.items():
+        if counts[names[key]] > 1:
+            names[key] = f"{path.name} ({path.parent.name or path.parent})"
     return names
