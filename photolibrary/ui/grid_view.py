@@ -257,9 +257,19 @@ class MediaGridView(QAbstractItemView):
         anchor = self.anchor() if keep_anchor else None
         geometry = MODE_GEOMETRY[self.mode]
         target = self.zoom if self.mode == "all" else TILE_TARGET[self.mode]
-        self._layout = GridLayout(self._section_counts(), self.viewport().width(), target, **geometry)
         bar = self.verticalScrollBar()
         height = self.viewport().height()
+        # Decide on the scrollbar from the full width alone. Letting Qt show it as needed
+        # bounces forever when the narrower cells it causes make everything fit again.
+        counts = self._section_counts()
+        full_width = self.contentsRect().width()
+        self._layout = GridLayout(counts, full_width, target, **geometry)
+        needs_bar = self._layout.total_height > height
+        if needs_bar:
+            self._layout = GridLayout(counts, full_width - bar.sizeHint().width(), target, **geometry)
+        policy = Qt.ScrollBarPolicy.ScrollBarAlwaysOn if needs_bar else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        if self.verticalScrollBarPolicy() != policy:
+            self.setVerticalScrollBarPolicy(policy)
         bar.setRange(0, max(0, self._layout.total_height - height))
         bar.setPageStep(height)
         bar.setSingleStep(max(20, int(self._layout.row_height / 3)))

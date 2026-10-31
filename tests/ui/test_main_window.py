@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -351,3 +352,37 @@ class ToolbarFitTests(WindowTestCase):
         self.assertEqual(window.rescan_button.text(), "")
         window.set_sort_order("oldest")
         self.assertEqual(window.sort_button.text(), "↑")
+
+
+class ScrollbarBounceTests(WindowTestCase):
+    """At some sizes the scrollbar's own width made everything fit, so it hid, then came back, forever."""
+
+    def build_extra_library(self):
+        for index in range(129):
+            self.write_photo(self.library / "2026-9" / f"SEP_{index:03d}.jpg",
+                             datetime(2026, 9, 1) + timedelta(hours=index))
+        self.expected_total = 26 + 129
+
+    def test_scrollbar_settles_when_it_alone_decides_whether_things_fit(self):
+        from photolibrary.core.grid_layout import GridLayout
+        from photolibrary.ui.grid_view import MODE_GEOMETRY
+        window, view = self.window, self.window.view
+        window.zoom_slider.setValue(80)
+        window.sidebar.select_album("2026-9")
+        self.wait_until(lambda: len(window.model.items) == 129, message="album shown")
+        bar = view.verticalScrollBar()
+        full = view.contentsRect().width()
+        low, high = (GridLayout([129], width, 80, **MODE_GEOMETRY["all"]).total_height
+                     for width in (full - bar.sizeHint().width(), full))
+        self.assertLess(low, high)
+        # A height where the grid fits with the scrollbar but not without it.
+        window.resize(window.width(), window.height() + (low + high) // 2 - view.viewport().height())
+        self.settle(0.1)
+        flips = []
+        bar.rangeChanged.connect(lambda *_: flips.append(bar.isVisible()))
+        visible = []
+        for _ in range(10):
+            self.settle(0.02)
+            visible.append(bar.isVisible())
+        self.assertEqual(len(set(visible)), 1, "the scrollbar kept appearing and disappearing")
+        self.assertEqual(flips, [])
