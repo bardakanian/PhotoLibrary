@@ -337,7 +337,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 181 tests (one to two minutes). It includes headless UI tests that drive the
+The suite has 182 tests (one to two minutes). It includes headless UI tests that drive the
 real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 folder watching, theme changes, the freeze monitor and pausing thumbnail work during
 playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):

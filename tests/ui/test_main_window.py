@@ -316,3 +316,21 @@ class HiddenAlbumWindowTests(WindowTestCase):
                         message="ready text without hidden albums")
         self.wait_until(lambda: json.loads(self.config_file.read_text()).get("hidden_albums") == [],
                         message="settings saved")
+
+
+class ToolbarFitTests(WindowTestCase):
+    def test_view_buttons_are_never_squeezed(self):
+        window = self.window
+        for width in (900, 1000, 1200, 1600):
+            window.resize(width, 800)
+            self.settle(0.1)
+            for mode, button in window.mode_buttons.items():
+                self.assertGreaterEqual(button.width(), button.sizeHint().width(), f"{mode} at {width} px")
+            self.assertLessEqual(window.toolbar.layout().minimumSize().width(), window.width())
+        # With room to spare the labels come back.
+        self.assertEqual(window.rescan_button.text(), "Rescan")
+        window.resize(900, 800)
+        self.settle(0.1)
+        self.assertEqual(window.rescan_button.text(), "")
+        window.set_sort_order("oldest")
+        self.assertEqual(window.sort_button.text(), "↑")

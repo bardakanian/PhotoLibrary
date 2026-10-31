@@ -8,7 +8,7 @@ from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QMenu, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QSlider, QSplitter, QStackedWidget, QStyle, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle, QVBoxLayout, QWidget,
 )
 
 from ..core.database import MediaRepository
@@ -171,7 +171,8 @@ class MainWindow(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(16, 10, 16, 10)
         toolbar_layout.setSpacing(8)
-        self.folder_button = QPushButton("Choose Folder")
+        self.folder_label = "Choose Folder"
+        self.folder_button = QPushButton(self.folder_label)
         self.folder_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.folder_button.setToolTip("Add a folder of photos and videos to the library (⌘O)")
         self.folder_button.clicked.connect(self.add_folder)
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
 
         segmented = QFrame()
         segmented.setProperty("role", "segmented")
+        segmented.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         segmented_layout = QHBoxLayout(segmented)
         segmented_layout.setContentsMargins(2, 2, 2, 2)
         segmented_layout.setSpacing(2)
@@ -199,6 +201,8 @@ class MainWindow(QMainWindow):
             button = QPushButton(label)
             button.setCheckable(True)
             button.setProperty("segment", True)
+            # Never squeeze the labels; the search box and zoom slider give up width instead.
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.setToolTip(f"{label} (⌘{number})")
             button.clicked.connect(lambda _checked=False, mode=mode: self.set_view_mode(mode))
             self.mode_group.addButton(button)
@@ -215,17 +219,20 @@ class MainWindow(QMainWindow):
         self.search_box = SearchBox("Search name or date")
         self.search_box.setAccessibleName("Search by filename or date")
         self.search_box.setToolTip("Filename words, or dates like 2023, May 2023, 2023-05-14 (⌘F)")
-        self.search_box.setFixedWidth(240)
+        self.search_box.setMinimumWidth(140)
+        self.search_box.setMaximumWidth(240)
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_box.textChanged.connect(lambda _text: self.search_timer.start())
         self.search_box.returnPressed.connect(self._search_return)
         self.search_box.installEventFilter(self)
-        toolbar_layout.addWidget(self.search_box)
+        toolbar_layout.addWidget(self.search_box, 2)  # grows before the spacers around the view buttons
         toolbar_layout.addSpacing(8)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setRange(MIN_ZOOM, MAX_ZOOM)
         self.zoom_slider.setValue(self.settings.zoom)
-        self.zoom_slider.setFixedWidth(130)
+        self.zoom_slider.setMinimumWidth(70)
+        self.zoom_slider.setMaximumWidth(130)
         self.zoom_slider.setAccessibleName("Thumbnail size")
         self.zoom_slider.setToolTip("Thumbnail size (⌘+ / ⌘−)")
         self.zoom_slider.valueChanged.connect(self._zoom_changed)
@@ -432,7 +439,8 @@ class MainWindow(QMainWindow):
             text = f"{len(roots)} folders"
         self.folder_status.setText(text)
         self.folder_status.setToolTip("\n".join(self.root_strings))
-        self.folder_button.setText("Add Folder" if roots else "Choose Folder")
+        self.folder_label = "Add Folder" if roots else "Choose Folder"
+        self._fit_toolbar()
         self.rescan_button.setEnabled(bool(roots) and not self.scanning)
 
     def add_folder(self) -> None:
@@ -925,10 +933,32 @@ class MainWindow(QMainWindow):
 
     def _apply_sort_controls(self) -> None:
         oldest = self.settings.sort_order == "oldest"
-        self.sort_button.setText("↑  Oldest First" if oldest else "↓  Newest First")
+        self._fit_toolbar()
         self.sort_button.setToolTip("Showing oldest first. Click to show newest first." if oldest
                                     else "Showing newest first. Click to show oldest first.")
         self.sort_action_by_key[self.settings.sort_order].setChecked(True)
+
+    def _fit_toolbar(self) -> None:
+        """Drop the text from Choose Folder, Rescan and the sort button when the full toolbar doesn't fit.
+
+        Otherwise Qt squeezes every button below its size and clips the labels.
+        """
+        oldest = self.settings.sort_order == "oldest"
+        full = (self.folder_label, "Rescan", "↑  Oldest First" if oldest else "↓  Newest First")
+        buttons = (self.folder_button, self.rescan_button, self.sort_button)
+        for button, text in zip(buttons, full):
+            button.setText(text)
+        for button, text in zip(buttons[:2], full):
+            button.setAccessibleName(text)  # still named for VoiceOver when only the icon shows
+        layout = self.toolbar.layout()
+        layout.invalidate()
+        if self.width() < layout.minimumSize().width():  # the toolbar spans the window
+            for button, text in zip(buttons, ("", "", "↑" if oldest else "↓")):
+                button.setText(text)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_toolbar()
 
     def _focused_item_index(self) -> int | None:
         """Index into the full item list of what's at the top of the screen."""
