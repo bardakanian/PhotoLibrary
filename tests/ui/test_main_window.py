@@ -88,6 +88,18 @@ class ViewerTests(WindowTestCase):
         self.window.viewer.canvas.toggle_actual_size()
         self.assertFalse(self.window.viewer.canvas.is_fitted)
 
+    def test_photo_without_a_cached_thumbnail_is_drawn_once_decoded(self):
+        """It used to stay black: "Loading…" dropped the zoom state the decoded photo needs."""
+        self.window.loader.cache.clear()
+        self.window.open_viewer(3)
+        canvas = self.window.viewer.canvas
+        self.wait_until(lambda: canvas.has_image, message="photo decoded")
+        self.settle(0.05)
+        image = canvas.grab().toImage()
+        lit = [image.pixelColor(x, y).lightness() > 40
+               for x in range(0, image.width(), 9) for y in range(0, image.height(), 9)]
+        self.assertTrue(any(lit), "the decoded photo was not drawn")
+
 
 class TrashTests(WindowTestCase):
     def confirm_trash(self):

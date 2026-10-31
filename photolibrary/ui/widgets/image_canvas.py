@@ -53,6 +53,9 @@ class ImageCanvas(QWidget):
             self._natural = size
             self._state = ZoomState.fitted(*size, self.width(), self.height()) if fitted or self._state is None \
                 else ZoomState.fitted(*size, self.width(), self.height()).with_scale(self._state.scale)
+        elif self._state is None:
+            # A message ("Loading…") was shown meanwhile; without a state nothing would be drawn.
+            self._state = ZoomState.fitted(*self._natural, self.width(), self.height())
         self._pixmap = pixmap
         self._emit_zoom()
         self.update()
