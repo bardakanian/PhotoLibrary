@@ -61,6 +61,12 @@ class GridTests(WindowTestCase):
         self.assertIn(first_january, visible)
 
 
+class TitleTests(WindowTestCase):
+    def test_title_shows_the_version(self):
+        from photolibrary.core.constants import APP_NAME, VERSION
+        self.assertEqual(self.window.windowTitle(), f"{APP_NAME} {VERSION}")
+
+
 class ViewerTests(WindowTestCase):
     def test_open_navigate_and_escape_back_to_same_place(self):
         bar = self.view.verticalScrollBar()

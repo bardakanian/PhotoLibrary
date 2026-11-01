@@ -8,7 +8,7 @@ from PySide6.QtCore import QCoreApplication, QLoggingCategory, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from photolibrary.core.constants import APP_DIR, APP_NAME
+from photolibrary.core.constants import APP_DIR, APP_NAME, VERSION
 
 
 def configure_logging() -> None:
@@ -50,6 +50,7 @@ def main() -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(VERSION)
     app.setStyle("Fusion")
     # Written by tools/make_launcher.py on Windows; without it the taskbar shows Python's icon.
     icon = Path(__file__).resolve().parent / "dist" / f"{APP_NAME}.ico"

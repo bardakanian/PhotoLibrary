@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 
 APP_NAME = "Photo Library"
+# The one place the version lives. Bump it with every change (minor: features, patch: fixes)
+# and add a matching entry to CHANGELOG.md.
+VERSION = "1.6.0"
 # PHOTO_LIBRARY_HOME points the app at a separate data folder (demos, smoke tests).
 APP_DIR = Path(os.environ.get("PHOTO_LIBRARY_HOME") or Path.home() / ".photo_library").expanduser()
 CONFIG_FILE = APP_DIR / "config.json"

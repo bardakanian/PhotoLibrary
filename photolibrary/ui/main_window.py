@@ -18,7 +18,7 @@ from ..core.library_roots import root_conflict
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
 from ..core import media as media_module
 from ..core.cache_cleanup import prune_thumbnail_cache
-from ..core.constants import COVER_EDGE
+from ..core.constants import APP_NAME, COVER_EDGE, VERSION
 from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
 from ..core.watcher import LibraryWatcher
@@ -129,7 +129,7 @@ class MainWindow(QMainWindow):
         self.view.setModel(self.model)
         self.theme.changed.connect(lambda _preference: self.view.viewport().update())
 
-        self.setWindowTitle("Photo Library")
+        self.setWindowTitle(f"{APP_NAME} {VERSION}")
         self.setMinimumSize(900, 600)
         self.resize(1320, 860)
         if self.settings.window_geometry:

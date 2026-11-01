@@ -27,7 +27,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
 PROJECT = Path(__file__).resolve().parent.parent
-APP_NAME = "Photo Library"
+sys.path.insert(0, str(PROJECT))
+from photolibrary.core.constants import APP_NAME, VERSION  # noqa: E402  (no Qt; safe to import)
+
 BUNDLE_ID = "local.photolibrary.launcher"
 EXECUTABLE = "launcher"
 ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
@@ -153,8 +155,8 @@ def build(output_dir: Path) -> Path:
         "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleExecutable": EXECUTABLE,
         "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "11.0",
         "NSHighResolutionCapable": True,
     }
