@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from photolibrary.core.watcher import WATCHDOG_ENABLED, ChangeBatcher, LibraryWatcher
+from photolibrary.core.watcher import WATCHDOG_ENABLED, ChangeBatcher, LibraryWatcher, _relevant
 
 
 class ChangeBatcherTests(unittest.TestCase):
@@ -41,6 +41,16 @@ class ChangeBatcherTests(unittest.TestCase):
         batcher = ChangeBatcher(quiet_seconds=1)
         batcher.note(0)  # e.g. a folder was renamed: no single file to track
         self.assertTrue(batcher.due(1.5, lambda path: None))
+
+
+class RelevantPathTests(unittest.TestCase):
+    def test_only_hidden_names_inside_the_library_count(self):
+        roots = ("/Users/me/.backup/Photos",)
+        self.assertTrue(_relevant("/Users/me/.backup/Photos/2026-1/a.jpg", False, roots))
+        self.assertTrue(_relevant("/Users/me/.backup/Photos/2026-1", True, roots))
+        self.assertFalse(_relevant("/Users/me/.backup/Photos/.hidden/a.jpg", False, roots))
+        self.assertFalse(_relevant("/Users/me/.backup/Photos/2026-1/._a.jpg", False, roots))
+        self.assertFalse(_relevant("/Users/me/.backup/Photos/notes.txt", False, roots))
 
 
 @unittest.skipUnless(WATCHDOG_ENABLED, "watchdog not installed")
@@ -104,3 +114,20 @@ class LibraryWatcherTests(unittest.TestCase):
 
     def test_missing_folder_cannot_be_watched(self):
         self.assertFalse(LibraryWatcher(self.folder / "unplugged", lambda: None).start())
+
+
+@unittest.skipUnless(WATCHDOG_ENABLED, "watchdog is not installed")
+class HiddenParentFolderTests(unittest.TestCase):
+    def test_library_inside_a_hidden_folder_is_watched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve() / ".backup" / "Photos"
+            folder.mkdir(parents=True)
+            changes = threading.Event()
+            watcher = LibraryWatcher(folder, changes.set, quiet_seconds=0.3)
+            self.assertTrue(watcher.start())
+            try:
+                time.sleep(1.2)
+                Image.new("RGB", (8, 8)).save(folder / "new.jpg")
+                self.assertTrue(changes.wait(8), "no change reported for a library inside a hidden folder")
+            finally:
+                watcher.stop()

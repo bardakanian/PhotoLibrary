@@ -26,8 +26,12 @@ def album_for(root: str, directory: str) -> str:
     return relative.split(os.sep, 1)[0]
 
 
-def walk_media(root: str, stop_event: threading.Event) -> Iterator[tuple[str, str, os.stat_result]]:
-    """Yield (path, directory, stat) for supported files. Skips hidden files and folders."""
+def walk_media(root: str, stop_event: threading.Event,
+               unreadable: list[str] | None = None) -> Iterator[tuple[str, str, os.stat_result]]:
+    """Yield (path, directory, stat) for supported files. Skips hidden files and folders.
+
+    Folders that can't be listed are added to `unreadable`: their files are unknown, not gone.
+    """
     stack = [root]
     while stack:
         if stop_event.is_set():
@@ -37,6 +41,8 @@ def walk_media(root: str, stop_event: threading.Event) -> Iterator[tuple[str, st
             with os.scandir(directory) as entries:
                 children = sorted(entries, key=lambda entry: entry.name)
         except OSError:
+            if unreadable is not None:
+                unreadable.append(directory)
             continue
         subfolders = []
         for entry in children:
@@ -116,11 +122,20 @@ class MediaIndexer:
 
             # One quick walk first, so progress can be reported against a real total.
             files = []
-            for found in walk_media(self.folder_root, self.stop_event):
+            unreadable: list[str] = []
+            for found in walk_media(self.folder_root, self.stop_event, unreadable):
                 files.append(found)
             if self.stop_event.is_set():
                 self.send("scan_cancelled")
                 return
+            if self.folder_root in unreadable:
+                # Present but not readable (no permission, a drive that isn't ready): like a
+                # missing folder, keep its index instead of treating every file as deleted.
+                self.send("scan_error", message=f"Folder can't be read: {self.folder_root}")
+                return
+            if unreadable:
+                LOGGER.warning("Could not read %d folder(s) in %s, keeping their index: %s",
+                               len(unreadable), self.folder_root, ", ".join(unreadable[:5]))
             total = len(files)
             self.send("scan_total", total=total)
 
@@ -211,7 +226,10 @@ class MediaIndexer:
             progress(force=True)
 
             deleted = 0
+            skipped = tuple(directory + os.sep for directory in unreadable)
             for file_path in set(cached) - seen:
+                if skipped and file_path.startswith(skipped):
+                    continue  # in a folder that couldn't be read this time
                 if self.stop_event.is_set():
                     self.send("scan_cancelled")
                     return
@@ -226,7 +244,7 @@ class MediaIndexer:
             """, (self.folder_root,)).fetchone()
             self.send("scan_complete", scanned=processed, updated=updated, unchanged=unchanged,
                       deleted=deleted, errors=errors, total_indexed=indexed, total_videos=videos,
-                      live_photos=live_photos)
+                      live_photos=live_photos, unreadable=len(unreadable))
         except Exception as exc:
             self.send("scan_error", message=str(exc))
         finally:
@@ -243,7 +261,7 @@ class MediaIndexer:
 
 
 COMPLETE_TOTALS = ("scanned", "updated", "unchanged", "deleted", "errors", "total_indexed", "total_videos",
-                   "live_photos")
+                   "live_photos", "unreadable")
 
 
 def index_folders(folders: Sequence[Path], stop_event: threading.Event, scan_id: int,

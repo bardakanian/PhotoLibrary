@@ -1,4 +1,5 @@
 import os
+import unittest
 import threading
 from datetime import datetime
 from unittest.mock import patch
@@ -151,3 +152,35 @@ class IndexerTests(TempAppTestCase):
         with patch.object(indexer, "BATCH_COMMIT_SIZE", 5):
             events = run_scan(library)
         self.assertGreaterEqual(sum(event["type"] == "batch_committed" for event in events), 2)
+
+
+@unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions and a non-root user")
+class UnreadableFolderTests(TempAppTestCase):
+    """A folder that exists but can't be listed must not look like every file in it was deleted."""
+
+    def setUp(self):
+        super().setUp()
+        self.library = self.make_library()
+        for day in range(1, 4):
+            self.write_photo(self.library / "Trip" / f"{day}.jpg", datetime(2020, 1, day))
+        self.write_photo(self.library / "root.jpg", datetime(2020, 2, 1))
+        run_scan(self.library)
+
+    def scan_locked(self, folder):
+        folder.chmod(0o000)
+        try:
+            return run_scan(self.library, scan_id=2)[-1]
+        finally:
+            folder.chmod(0o755)
+
+    def test_unreadable_library_folder_keeps_its_index(self):
+        done = self.scan_locked(self.library)
+        self.assertEqual(done["type"], "scan_error")
+        self.assertIn("can't be read", done["message"])
+        self.assertEqual(len(database.MediaRepository().query(self.library)), 4)
+
+    def test_unreadable_album_keeps_its_photos_and_the_rest_still_updates(self):
+        (self.library / "root.jpg").unlink()
+        done = self.scan_locked(self.library / "Trip")
+        self.assertEqual((done["type"], done["deleted"], done["unreadable"]), ("scan_complete", 1, 1))
+        self.assertEqual(sorted(name for name, _ in rows()), ["1.jpg", "2.jpg", "3.jpg"])

@@ -5,7 +5,8 @@ painting, hit-testing and selection only ever touch the rows on screen. Qt's sel
 model provides Cmd/Shift-click, keyboard navigation and select-all on top of it.
 """
 
-from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QPersistentModelIndex, QPoint,
+                            QPointF, QRect, QRectF, Qt, QTimer, Signal)
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF, QRegion
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
@@ -195,6 +196,8 @@ class MediaGridView(QAbstractItemView):
         self.zoom = 160
         self._layout = GridLayout([], 1, self.zoom)
         self._anchor_point = QPointF(0, 0)   # content coordinates of the selection anchor
+        # The item the anchor point was on: zooming or resizing moves items under the point.
+        self._anchor_index = QPersistentModelIndex()
         self._visible_ids: set[int] = set()
         self._pinch = 0.0
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -388,6 +391,7 @@ class MediaGridView(QAbstractItemView):
         """Select the reading-order range between the anchor and the other corner, like Photos."""
         model = self.model()
         offset = self.verticalOffset()
+        self._follow_anchor_item()
         anchor = QPointF(self._anchor_point.x(), self._anchor_point.y() - offset)
         normalized = rect.normalized()
         # The anchor is one corner of the rectangle; the pointer is the opposite one.
@@ -403,6 +407,24 @@ class MediaGridView(QAbstractItemView):
             first, last = sorted((start, end))
             selection.select(model.index(first, 0), model.index(last, 0))
         self.selectionModel().select(selection, command)
+
+    def _set_anchor(self, point: QPointF) -> None:
+        self._anchor_point = point
+        row = self._layout.nearest_index(point.x(), point.y())
+        model = self.model()
+        self._anchor_index = QPersistentModelIndex(model.index(row, 0)) if row is not None and model else \
+            QPersistentModelIndex()
+
+    def _follow_anchor_item(self) -> None:
+        """Move the anchor point back onto its item if the layout changed since it was set."""
+        if not self._anchor_index.isValid():
+            return
+        row = self._anchor_index.row()
+        if row >= self._layout.item_count:
+            return
+        if self._layout.nearest_index(self._anchor_point.x(), self._anchor_point.y()) != row:
+            rect = self._layout.rect_for(row)
+            self._anchor_point = QPointF(rect.x + rect.width / 2, rect.y + rect.height / 2)
 
     def visualRegionForSelection(self, selection: QItemSelection) -> QRegion:
         region = QRegion()
@@ -421,7 +443,7 @@ class MediaGridView(QAbstractItemView):
 
     def mousePressEvent(self, event) -> None:
         if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            self._anchor_point = QPointF(event.position().x(), event.position().y() + self.verticalOffset())
+            self._set_anchor(QPointF(event.position().x(), event.position().y() + self.verticalOffset()))
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event) -> None:
@@ -436,7 +458,7 @@ class MediaGridView(QAbstractItemView):
         super().keyPressEvent(event)
         if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier and self.currentIndex().isValid():
             rect = self._layout.rect_for(self.currentIndex().row())
-            self._anchor_point = QPointF(rect.x + rect.width / 2, rect.y + rect.height / 2)
+            self._set_anchor(QPointF(rect.x + rect.width / 2, rect.y + rect.height / 2))
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and self.mode == "all":

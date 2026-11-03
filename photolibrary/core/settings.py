@@ -1,4 +1,6 @@
+import itertools
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,7 +39,20 @@ def _hidden_albums(value) -> list[tuple[str, str]]:
 
 
 class SettingsStore:
-    """JSON configuration that keeps keys it doesn't know about."""
+    """JSON configuration that keeps keys it doesn't know about.
+
+    Saves may run on several worker threads. Take a `ticket()` when the change is made (on the
+    UI thread) and pass it to `save`: saves then write one at a time, and one that finishes
+    after a newer save is dropped instead of overwriting it with older settings.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tickets = itertools.count(1)
+        self._written = 0
+
+    def ticket(self) -> int:
+        return next(self._tickets)
 
     def load(self) -> AppSettings:
         data: dict = {}
@@ -89,7 +104,17 @@ class SettingsStore:
             hidden_albums=_hidden_albums(data.get("hidden_albums")),
         )
 
-    def save(self, settings: AppSettings) -> None:
+    def save(self, settings: AppSettings, ticket: int | None = None) -> bool:
+        """Write the settings. Returns False if a newer ticket was already written."""
+        with self._lock:
+            if ticket is not None:
+                if ticket <= self._written:
+                    return False
+                self._written = ticket
+            self._write(settings)
+            return True
+
+    def _write(self, settings: AppSettings) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         existing: dict = {}
         try:

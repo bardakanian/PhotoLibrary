@@ -392,3 +392,22 @@ class ScrollbarBounceTests(WindowTestCase):
             visible.append(bar.isVisible())
         self.assertEqual(len(set(visible)), 1, "the scrollbar kept appearing and disappearing")
         self.assertEqual(flips, [])
+
+
+class ShiftClickTests(WindowTestCase):
+    def test_shift_click_range_starts_at_the_clicked_photo_after_zooming(self):
+        self.window.zoom_slider.setValue(200)
+        self.settle(0.1)
+        self.click_row(2)
+        self.window.zoom_slider.setValue(80)  # every photo moves on screen
+        self.settle(0.1)
+        self.click_row(6, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(self.selected_rows(), [2, 3, 4, 5, 6])
+
+    def test_shift_click_after_a_resize(self):
+        self.window.zoom_slider.setValue(120)
+        self.click_row(9)
+        self.window.resize(900, 700)
+        self.settle(0.1)
+        self.click_row(11, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(self.selected_rows(), [9, 10, 11])

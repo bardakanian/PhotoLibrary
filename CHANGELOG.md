@@ -5,6 +5,17 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.6.1 — 2026-11-02
+
+- A library or album folder that exists but can't be read (no permission, a drive that isn't
+  ready) no longer has all its photos removed from the library. The scan keeps them and says
+  the folder couldn't be read.
+- Shift-click selects from the photo you clicked, even after zooming or resizing the window.
+  It used to start from whatever photo had moved under that spot.
+- Settings changes made in quick succession are no longer lost when an older save finishes last.
+- Automatic updates work for a library inside a hidden folder, such as `~/.backup/Photos`.
+- Search ignores letter case for every letter (`été` finds `Été.jpg`), not only A–Z.
+
 ## 1.6.0 — 2026-11-01
 
 - The version number is shown in the window title and set as the application version.

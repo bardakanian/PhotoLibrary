@@ -75,8 +75,15 @@ class ChangeBatcher:
         return True
 
 
-def _relevant(path: str, is_directory: bool) -> bool:
-    if any(part.startswith(".") for part in Path(path).parts[1:]):
+def _relevant(path: str, is_directory: bool, roots: tuple[str, ...] = ()) -> bool:
+    """Whether a changed path could be library media. `roots` are the watched folder's spellings.
+
+    Only names inside the library count as hidden: a library kept in, say, ~/.backup/Photos
+    still has every change reported.
+    """
+    inside = next((path[len(root):] for root in roots if path.startswith(root + os.sep)), None)
+    parts = Path(inside).parts if inside is not None else (os.path.basename(path),)
+    if any(part.startswith(".") for part in parts):
         return False  # hidden files and folders (.DS_Store, .Trashes, ._AppleDouble)
     return is_directory or os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS
 
@@ -103,6 +110,9 @@ class _Handler(FileSystemEventHandler):
     def __init__(self, watcher: "LibraryWatcher"):
         super().__init__()
         self.watcher = watcher
+        # FSEvents reports real paths (/private/var/... for /var/...), so match both spellings.
+        folder = str(watcher.folder).rstrip(os.sep)
+        self.roots = tuple(dict.fromkeys((folder, os.path.realpath(folder))))
 
     def on_any_event(self, event: "FileSystemEvent") -> None:
         if event.event_type in {"opened", "closed_no_write"}:
@@ -115,7 +125,7 @@ class _Handler(FileSystemEventHandler):
         if getattr(event, "dest_path", ""):
             paths.append(os.fsdecode(event.dest_path))
         for path in paths:
-            if _relevant(path, event.is_directory):
+            if _relevant(path, event.is_directory, self.roots):
                 self.watcher.notice(path, event.is_directory)
 
 

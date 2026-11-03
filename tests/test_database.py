@@ -69,6 +69,13 @@ class RepositoryTests(TempAppTestCase):
         self.assertEqual(self.names(search=parse_query("sun 2023-08")), ["sunset.jpg"])
         self.assertEqual(self.names(search=parse_query("nothing-here")), [])
 
+    def test_search_ignores_case_and_accent_form_for_every_letter(self):
+        import unicodedata
+        stored = unicodedata.normalize("NFD", "Été_Øresund.jpg")  # how macOS may store the name
+        insert(self.library, [(stored, "", "image", "2020-07-01T00:00:00")])
+        for typed in ("été", "ÉTÉ", "øresund", "Été_Ø"):
+            self.assertEqual(self.names(search=parse_query(typed)), [stored], typed)
+
     def test_search_escapes_like_wildcards(self):
         insert(self.library, [("100%_done.jpg", "", "image", "2020-01-01T00:00:00")])
         self.assertEqual(self.names(search=parse_query("%_")), ["100%_done.jpg"])
@@ -201,3 +208,22 @@ class SettingsTests(TempAppTestCase):
         self.app_dir.mkdir()
         self.config_file.write_text("{not json")
         self.assertEqual(SettingsStore().load(), AppSettings())
+
+    def test_an_older_save_finishing_last_does_not_overwrite_a_newer_one(self):
+        store = SettingsStore()
+        older, newer = AppSettings(zoom=100), AppSettings(zoom=200, hidden_albums=[("/lib", "Trip")])
+        older_ticket, newer_ticket = store.ticket(), store.ticket()
+        self.assertTrue(store.save(newer, newer_ticket))
+        self.assertFalse(store.save(older, older_ticket))  # its worker thread ran late
+        self.assertEqual(store.load().zoom, 200)
+        self.assertEqual(store.load().hidden_albums, [("/lib", "Trip")])
+
+    def test_saves_from_many_threads_end_with_the_newest(self):
+        store = SettingsStore()
+        jobs = [(store.ticket(), AppSettings(zoom=80 + index)) for index in range(40)]
+        threads = [threading.Thread(target=store.save, args=(settings, ticket)) for ticket, settings in reversed(jobs)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(store.load().zoom, 80 + 39)

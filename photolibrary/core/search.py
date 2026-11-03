@@ -5,6 +5,7 @@ Whole words that look like dates narrow by date: ``2023``, ``May``, ``May 2023``
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 MONTHS = {
@@ -20,6 +21,12 @@ _FULL_DATE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
 _YEAR_MONTH = re.compile(r"^(\d{4})[-/.](\d{1,2})$")
 _YEAR = re.compile(r"^(19|20)\d{2}$")
 _DAY = re.compile(r"^\d{1,2}(st|nd|rd|th)?$")
+
+
+def fold(text: str | None) -> str | None:
+    """Case- and accent-form-insensitive text for matching. SQLite's own LIKE folds only A-Z, and
+    macOS may store "é" as "e" plus a combining accent, which a typed "é" wouldn't match."""
+    return unicodedata.normalize("NFC", text).casefold() if text else text
 
 
 @dataclass(frozen=True)
@@ -38,8 +45,9 @@ class SearchFilter:
         clauses: list[str] = []
         params: list[object] = []
         for term in self.name_terms:
-            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            clauses.append("file_name LIKE ? ESCAPE '\\'")
+            escaped = fold(term).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # fold() is registered on every connection by database.open_database.
+            clauses.append("fold(file_name) LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
         for column, value in (("capture_year", self.year), ("capture_month", self.month), ("capture_day", self.day)):
             if value is not None:

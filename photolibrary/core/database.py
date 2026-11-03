@@ -8,6 +8,7 @@ from typing import Iterable
 from .constants import APP_DIR, DB_FILE, THUMBNAIL_DIR
 from .library_roots import Folders, normalize_roots
 from .models import Album, AnalyticsResult, MediaItem, YearMediaCount
+from .search import fold
 
 SCHEMA_VERSION = 1
 
@@ -31,6 +32,7 @@ def open_database() -> sqlite3.Connection:
     ensure_app_dirs()
     connection = sqlite3.connect(DB_FILE, timeout=30)
     connection.execute("PRAGMA synchronous=NORMAL")
+    connection.create_function("fold", 1, fold, deterministic=True)  # used by search filters
     key = str(DB_FILE)
     if key not in _initialized:
         # Schema and WAL setup need an exclusive lock; do it once per process, not per connection.

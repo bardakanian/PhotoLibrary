@@ -613,6 +613,9 @@ class MainWindow(QMainWindow):
                     parts.append(f"{event['deleted']:,} removed")
                 if event["errors"]:
                     parts.append(f"{event['errors']:,} unreadable")
+                if event.get("unreadable"):
+                    count = event["unreadable"]
+                    parts.append(f"{count:,} folder{'s' if count != 1 else ''} couldn't be read")
                 unavailable = event.get("missing_folders", []) + event.get("failed_folders", [])
                 if unavailable:
                     names = ", ".join(f"“{Path(folder).name}”" for folder in unavailable)
@@ -635,6 +638,10 @@ class MainWindow(QMainWindow):
             elif event.get("missing_folders") and not event.get("failed_folders"):
                 # Every folder is missing (say, an unplugged drive): keep showing what was indexed.
                 self.status.setText("Library folder not found  ·  showing what was indexed before")
+                self._update_empty_state()
+            elif event.get("failed_folders"):
+                # A folder that can't be read keeps its index too (see MediaIndexer.run).
+                self.status.setText("The library folder couldn't be read  ·  showing what was indexed before")
                 self._update_empty_state()
             else:
                 self.status.setText("Indexing failed")
@@ -1428,7 +1435,8 @@ class MainWindow(QMainWindow):
     def _save_settings(self) -> None:
         snapshot = dataclasses.replace(self.settings)
         store = self.settings_store
-        run_async(self.io_pool, lambda: store.save(snapshot), lambda _result: None,
+        ticket = store.ticket()  # taken here, so a slower older save can't overwrite this one
+        run_async(self.io_pool, lambda: store.save(snapshot, ticket), lambda _result: None,
                   lambda error: LOGGER.error("Could not save settings", exc_info=error))
 
     def show_preferences(self) -> None:
