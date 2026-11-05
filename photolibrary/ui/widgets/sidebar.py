@@ -8,13 +8,15 @@ from PySide6.QtWidgets import QAbstractItemView, QFrame, QMenu, QStyle, QStyledI
 
 from ...core.library_roots import display_names
 from ...core.models import Album
+from ...core.settings import SIDEBAR_SECTIONS
 from ..theme.typography import Typography
 from ..thumbnails import ThumbnailLoader
 
 ScopeRole = Qt.ItemDataRole.UserRole + 1   # ("kind", "all" | "photos" | "videos"), ("folder", root) or ("album", root, name)
 CountRole = Qt.ItemDataRole.UserRole + 2
 CoverRole = Qt.ItemDataRole.UserRole + 3   # MediaItem used as the album thumbnail
-HeaderRole = Qt.ItemDataRole.UserRole + 4
+HeaderRole = Qt.ItemDataRole.UserRole + 4   # the section's key: "library", "folders", "albums" or "hidden"
+CollapsedRole = Qt.ItemDataRole.UserRole + 5
 
 LIBRARY_ENTRIES = (("all", "All Photos"), ("photos", "Photos"), ("videos", "Videos"))
 ICON_SIZE = 22
@@ -44,6 +46,8 @@ class SidebarDelegate(QStyledItemDelegate):
             painter.setPen(QColor(colors.text_subtle))
             painter.drawText(rect.adjusted(12, 6, -8, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                              index.data(Qt.ItemDataRole.DisplayRole).upper())
+            if option.state & QStyle.StateFlag.State_MouseOver or index.data(CollapsedRole):
+                self._paint_chevron(painter, rect, bool(index.data(CollapsedRole)))
             painter.restore()
             return
 
@@ -80,6 +84,19 @@ class SidebarDelegate(QStyledItemDelegate):
                                                 name_rect.width())
         painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
         painter.restore()
+
+    def _paint_chevron(self, painter: QPainter, rect, collapsed: bool) -> None:
+        """A small › (collapsed) or ⌄ (open) at the right of a section header, as in Finder."""
+        pen = QPen(QColor(self.theme.colors.text_subtle), 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        x, y = rect.right() - 18, rect.center().y() + 3
+        if collapsed:
+            points = [QPointF(x - 2, y - 4), QPointF(x + 2, y), QPointF(x - 2, y + 4)]
+        else:
+            points = [QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2)]
+        painter.drawPolyline(points)
 
     def _paint_cover(self, painter: QPainter, rect: QRectF, cover) -> None:
         path = QPainterPath()
@@ -144,6 +161,7 @@ class Sidebar(QFrame):
     """
 
     scope_changed = Signal(str, object, object)
+    collapsed_changed = Signal(object)  # sorted list of collapsed section keys
     remove_folder_requested = Signal(str)
     hide_album_requested = Signal(str, str, bool)  # root, album, hide (False: show again)
     add_folder_requested = Signal()
@@ -171,11 +189,12 @@ class Sidebar(QFrame):
         layout.addWidget(self.tree)
 
         self.model = QStandardItemModel(self)
-        self.library_header = self._header("Library")
-        self.folders_header = self._header("Folders")
-        self.albums_header = self._header("Albums")
+        self.collapsed: set[str] = set()  # section keys the user folded away
+        self.library_header = self._header("Library", "library")
+        self.folders_header = self._header("Folders", "folders")
+        self.albums_header = self._header("Albums", "albums")
         # Listed only while some album is hidden; its albums still open when clicked.
-        self.hidden_header = self._header("Hidden Albums")
+        self.hidden_header = self._header("Hidden Albums", "hidden")
         self.model.appendRow(self.library_header)
         self._library_items: dict[str, QStandardItem] = {}
         for kind, label in LIBRARY_ENTRIES:
@@ -184,7 +203,8 @@ class Sidebar(QFrame):
             self._library_items[kind] = item
         self.model.appendRow(self.albums_header)
         self.tree.setModel(self.model)
-        self.tree.expandAll()
+        self._apply_collapsed()
+        self.tree.clicked.connect(self._clicked)
         self.tree.selectionModel().currentChanged.connect(self._current_changed)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
@@ -196,11 +216,44 @@ class Sidebar(QFrame):
         self.select_scope("all", None, None)
 
     @staticmethod
-    def _header(text: str) -> QStandardItem:
+    def _header(text: str, key: str) -> QStandardItem:
         item = QStandardItem(text)
-        item.setData(True, HeaderRole)
+        item.setData(key, HeaderRole)
+        item.setToolTip(f"Click to show or hide {text}")
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         return item
+
+    def _headers(self) -> list[QStandardItem]:
+        return [self.library_header, self.folders_header, self.albums_header, self.hidden_header]
+
+    def set_collapsed(self, keys) -> None:
+        """Fold these sections (for example as saved from the last session)."""
+        self.collapsed = {key for key in keys if key in SIDEBAR_SECTIONS}
+        self._apply_collapsed()
+
+    def toggle_section(self, key: str) -> None:
+        self.collapsed ^= {key}
+        self._apply_collapsed()
+        # Folding a section can take the highlight off the current entry; put it back on reopening.
+        self.select_scope(*self._scope, notify=False)
+        self.collapsed_changed.emit(sorted(self.collapsed))
+
+    def _apply_collapsed(self) -> None:
+        """Open every listed section except the folded ones. Runs after any rebuild of the list."""
+        quiet, self._quiet = getattr(self, "_quiet", False), True  # collapsing may move the current row
+        try:
+            for header in self._headers():
+                folded = header.data(HeaderRole) in self.collapsed
+                header.setData(folded, CollapsedRole)
+                if header.model() is not None:
+                    self.tree.setExpanded(header.index(), not folded)
+        finally:
+            self._quiet = quiet
+
+    def _clicked(self, index: QModelIndex) -> None:
+        key = index.data(HeaderRole)
+        if key:
+            self.toggle_section(key)
 
     @staticmethod
     def _entry(text: str, scope: tuple) -> QStandardItem:
@@ -236,7 +289,7 @@ class Sidebar(QFrame):
                     item.setToolTip(folder)
                     item.setData((counts or {}).get(folder), CountRole)
                     self.folders_header.appendRow(item)
-            self.tree.expandAll()
+            self._apply_collapsed()
         finally:
             self._quiet = False
         if root is not None and root not in roots:
@@ -275,7 +328,7 @@ class Sidebar(QFrame):
                 self.model.appendRow(self.hidden_header)
             elif not tucked and listed:
                 self.model.takeRow(self.hidden_header.row())
-            self.tree.expandAll()
+            self._apply_collapsed()
         finally:
             self._quiet = False
         if album is not None and (root, album) not in {(entry.root, entry.name) for entry in albums}:

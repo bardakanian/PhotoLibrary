@@ -33,7 +33,10 @@ incremental indexer) come from the On This Day app.
 - **Sidebar**: All Photos, Photos and Videos with counts, the library folders (when there
   is more than one), plus each top-level subfolder as an **album** with its newest photo as
   a thumbnail. An album includes everything in its nested folders. When two folders have an
-  album with the same name, each is labelled with its folder, as in "Trips — Backup Drive". Toggle the sidebar with ⌥⌘S.
+  album with the same name, each is labelled with its folder, as in "Trips — Backup Drive".
+  Click a section heading (Library, Folders, Albums, Hidden Albums) to fold it away or open it
+  again; the app remembers which are folded. Hide the whole sidebar with the sidebar button at
+  the left of the toolbar, or ⌥⌘S.
 - **Hide an album:** right-click it in the sidebar and choose **Hide Album**. Its photos
   disappear from All Photos, Photos, Videos, Years, Months, search, the counts and Insights,
   and it moves to a **Hidden Albums** section. You can still open it from there. Right-click ▸
@@ -338,7 +341,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 197 tests (one to two minutes). It includes headless UI tests that drive the
+The suite has 201 tests (one to two minutes). It includes headless UI tests that drive the
 real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 folder watching, theme changes, the freeze monitor and pausing thumbnail work during
 playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):

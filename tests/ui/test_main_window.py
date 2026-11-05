@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,7 +9,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox
 
 from photolibrary.core import media
-from photolibrary.ui.widgets.sidebar import CountRole
+from photolibrary.ui.widgets.sidebar import CountRole, ScopeRole
 
 from .base import WindowTestCase
 
@@ -411,3 +412,68 @@ class ShiftClickTests(WindowTestCase):
         self.settle(0.1)
         self.click_row(11, Qt.KeyboardModifier.ShiftModifier)
         self.assertEqual(self.selected_rows(), [9, 10, 11])
+
+
+class SidebarSectionTests(WindowTestCase):
+    def click_header(self, header):
+        tree = self.window.sidebar.tree
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         tree.visualRect(header.index()).center())
+        self.settle(0.05)
+
+    def test_clicking_a_section_header_folds_it_and_the_choice_is_remembered(self):
+        sidebar = self.window.sidebar
+        albums, tree = sidebar.albums_header, sidebar.tree
+        first_album = albums.child(0).index()
+        self.assertFalse(tree.visualRect(first_album).isEmpty())
+        self.click_header(albums)
+        self.assertFalse(tree.isExpanded(albums.index()))
+        self.assertTrue(tree.visualRect(first_album).isEmpty(), "albums still listed")
+        self.wait_until(lambda: json.loads(self.config_file.read_text()).get("collapsed_sections") == ["albums"],
+                        message="collapsed section saved")
+        # Reloading the album list (after a scan) keeps it folded.
+        self.window.reload_sidebar()
+        self.settle(0.3)
+        self.assertFalse(tree.isExpanded(albums.index()))
+        self.click_header(albums)
+        self.assertTrue(tree.isExpanded(albums.index()))
+        self.wait_until(lambda: json.loads(self.config_file.read_text()).get("collapsed_sections") == [],
+                        message="expanded section saved")
+
+    def test_folding_the_section_with_the_open_album_keeps_showing_it(self):
+        sidebar = self.window.sidebar
+        sidebar.select_album("2026-2")
+        self.wait_until(lambda: len(self.window.model.items) == 12, message="album shown")
+        self.click_header(sidebar.albums_header)
+        self.click_header(sidebar.albums_header)
+        self.assertEqual(sidebar.scope, ("all", sidebar.albums_header.child(1).data(ScopeRole)[1], "2026-2"))
+        self.assertEqual(len(self.window.model.items), 12)
+        self.assertEqual(sidebar.tree.currentIndex().data(ScopeRole)[2], "2026-2")
+
+    def test_saved_sections_start_folded(self):
+        from photolibrary.ui.widgets.sidebar import Sidebar
+        sidebar = Sidebar(self.window.loader, self.window.theme)
+        sidebar.set_collapsed(["library", "bogus"])
+        self.assertEqual(sidebar.collapsed, {"library"})
+        self.assertFalse(sidebar.tree.isExpanded(sidebar.library_header.index()))
+        self.assertTrue(sidebar.tree.isExpanded(sidebar.albums_header.index()))
+        sidebar.deleteLater()
+
+
+class SidebarButtonTests(WindowTestCase):
+    def test_toolbar_button_hides_and_shows_the_sidebar_and_stays_in_step_with_the_menu(self):
+        window = self.window
+        button = window.sidebar_button
+        self.assertTrue(window.sidebar.isVisible() and button.isChecked())
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        self.settle(0.05)
+        self.assertFalse(window.sidebar.isVisible())
+        self.assertFalse(window.sidebar_action.isChecked())
+        self.assertIn("Show the sidebar", button.toolTip())
+        self.wait_until(lambda: json.loads(self.config_file.read_text()).get("sidebar_visible") is False,
+                        message="hidden sidebar saved")
+        window.sidebar_action.trigger()  # the View menu / ⌥⌘S
+        self.settle(0.05)
+        self.assertTrue(window.sidebar.isVisible() and button.isChecked())
+        self.assertIn("Hide the sidebar", button.toolTip())
+        self.assertLessEqual(window.compact_toolbar_width(), 900 if not sys.platform.startswith("win") else 1100)

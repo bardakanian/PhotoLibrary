@@ -5,6 +5,18 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.8.0 — 2026-11-04
+
+- A sidebar button at the left of the toolbar hides the whole sidebar and brings it back, in
+  step with View ▸ Show Sidebar (⌥⌘S).
+- On narrow windows the zoom slider's ▫/◻ marks hide along with the button labels, so the
+  toolbar still fits at the smallest window size.
+
+## 1.7.0 — 2026-11-04
+
+- Sidebar sections fold: click Library, Folders, Albums or Hidden Albums to collapse or expand
+  it. A folded section shows a › and stays folded after a restart.
+
 ## 1.6.1 — 2026-11-02
 
 - A library or album folder that exists but can't be read (no permission, a drive that isn't

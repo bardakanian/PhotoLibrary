@@ -36,6 +36,7 @@ from .theme import ThemeManager
 from .thumbnails import ThumbnailLoader
 from .time_format import uses_12_hour
 from .widgets import SearchBox
+from .widgets.common import sidebar_icon
 from .widgets.info_panel import REVEAL_LABEL, InfoPanel
 from .widgets.sidebar import Sidebar
 
@@ -171,6 +172,16 @@ class MainWindow(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(16, 10, 16, 10)
         toolbar_layout.setSpacing(8)
+        self.sidebar_button = QPushButton()
+        self.sidebar_button.setCheckable(True)
+        self.sidebar_button.setChecked(self.settings.sidebar_visible)
+        self.sidebar_button.setProperty("compact", True)
+        self.sidebar_button.setProperty("variant", "ghost")
+        self.sidebar_button.setToolTip("Hide the sidebar (⌥⌘S)" if self.settings.sidebar_visible
+                                       else "Show the sidebar (⌥⌘S)")
+        self.sidebar_button.setAccessibleName("Show sidebar")
+        self.sidebar_button.clicked.connect(self.toggle_sidebar)
+        toolbar_layout.addWidget(self.sidebar_button)
         self.folder_label = "Choose Folder"
         self.folder_button = QPushButton(self.folder_label)
         self.folder_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
@@ -244,6 +255,7 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(small)
         toolbar_layout.addWidget(self.zoom_slider)
         toolbar_layout.addWidget(large)
+        self.zoom_marks = (small, large)  # dropped with the button labels when space is short
         toolbar_layout.addSpacing(6)
         self.info_button = QPushButton("ⓘ")
         self.info_button.setCheckable(True)
@@ -305,7 +317,11 @@ class MainWindow(QMainWindow):
         self.sidebar.hide_album_requested.connect(self.set_album_hidden)
         self.sidebar.remove_folder_requested.connect(lambda root: self.remove_folder(Path(root)))
         self.sidebar.setVisible(self.settings.sidebar_visible)
+        self.sidebar.set_collapsed(self.settings.collapsed_sections)
+        self.sidebar.collapsed_changed.connect(self._sidebar_sections_changed)
         self.theme.changed.connect(lambda _preference: self.sidebar.tree.viewport().update())
+        self.theme.changed.connect(lambda _preference: self._update_sidebar_icon())
+        self._update_sidebar_icon()
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setHandleWidth(1)
         self.splitter.setChildrenCollapsible(False)
@@ -793,9 +809,15 @@ class MainWindow(QMainWindow):
             return True
         return super().eventFilter(watched, event)
 
+    def _update_sidebar_icon(self) -> None:
+        self.sidebar_button.setIcon(sidebar_icon(self.theme.colors.text_muted))
+
     def toggle_sidebar(self) -> None:
         self.settings.sidebar_visible = not self.settings.sidebar_visible
-        self.sidebar_action.setChecked(self.settings.sidebar_visible)
+        visible = self.settings.sidebar_visible
+        for control in (self.sidebar_action, self.sidebar_button):
+            control.setChecked(visible)
+        self.sidebar_button.setToolTip("Hide the sidebar (⌥⌘S)" if visible else "Show the sidebar (⌥⌘S)")
         if not self.viewer_active:
             self.sidebar.setVisible(self.settings.sidebar_visible)
         self.settings_timer.start()
@@ -971,6 +993,8 @@ class MainWindow(QMainWindow):
             button.setText(text)
         for button, text in zip(buttons[:2], full):
             button.setAccessibleName(text)  # still named for VoiceOver when only the icon shows
+        for mark in self.zoom_marks:
+            mark.setVisible(not compact)
         layout = self.toolbar.layout()
         layout.invalidate()
         return layout.minimumSize().width()
@@ -1431,6 +1455,10 @@ class MainWindow(QMainWindow):
                   rebuilt)
 
     # Settings ------------------------------------------------------------
+
+    def _sidebar_sections_changed(self, collapsed: list[str]) -> None:
+        self.settings.collapsed_sections = list(collapsed)
+        self._save_settings()
 
     def _save_settings(self) -> None:
         snapshot = dataclasses.replace(self.settings)

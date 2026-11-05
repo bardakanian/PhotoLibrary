@@ -1,5 +1,5 @@
-from PySide6.QtCore import QEvent, QRectF, Qt, Signal
-from PySide6.QtGui import QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 
@@ -81,3 +81,28 @@ class EmptyState(QFrame):
         self.message_label.setText(message)
         self.button.setText(action_text)
         self.button.setVisible(bool(action_text))
+
+
+def sidebar_icon(color: str, size: int = 18) -> QIcon:
+    """A window outline with a left column: the usual "show or hide sidebar" glyph."""
+    icon = QIcon()
+    for scale in (1, 2):
+        pixmap = QPixmap(size * scale, size * scale)
+        pixmap.setDevicePixelRatio(scale)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor(color), 1.5)
+            painter.setPen(pen)
+            frame = QRectF(1.75, 3.25, size - 3.5, size - 6.5)
+            painter.drawRoundedRect(frame, 2.5, 2.5)
+            column = frame.left() + frame.width() * 0.36
+            painter.drawLine(QPointF(column, frame.top()), QPointF(column, frame.bottom()))
+            for row in range(3):
+                y = frame.top() + 3 + row * 2.5
+                painter.drawLine(QPointF(frame.left() + 2.25, y), QPointF(column - 2.25, y))
+        finally:
+            painter.end()
+        icon.addPixmap(pixmap)
+    return icon

@@ -9,6 +9,7 @@ from .constants import APP_DIR, CONFIG_FILE
 VIEW_MODES = ("years", "months", "all")
 TIME_FORMATS = ("system", "12", "24")
 SORT_ORDERS = ("newest", "oldest")
+SIDEBAR_SECTIONS = ("library", "folders", "albums", "hidden")
 MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 80, 320, 160
 
 
@@ -27,6 +28,8 @@ class AppSettings:
     window_geometry: str = ""
     # Albums left out of All Photos, search, counts and Insights: (resolved library folder, album name).
     hidden_albums: list[tuple[str, str]] = field(default_factory=list)
+    # Sidebar sections the user folded away (keys from SIDEBAR_SECTIONS).
+    collapsed_sections: list[str] = field(default_factory=list)
 
 
 def _hidden_albums(value) -> list[tuple[str, str]]:
@@ -36,6 +39,11 @@ def _hidden_albums(value) -> list[tuple[str, str]]:
             if tuple(entry) not in albums:
                 albums.append(tuple(entry))
     return albums
+
+
+def _collapsed_sections(value) -> list[str]:
+    known = value if isinstance(value, list) else []
+    return [key for key in SIDEBAR_SECTIONS if key in known]
 
 
 class SettingsStore:
@@ -102,6 +110,7 @@ class SettingsStore:
             watch_folder=bool(data.get("watch_folder", True)),
             window_geometry=str(data.get("window_geometry", "")),
             hidden_albums=_hidden_albums(data.get("hidden_albums")),
+            collapsed_sections=_collapsed_sections(data.get("collapsed_sections")),
         )
 
     def save(self, settings: AppSettings, ticket: int | None = None) -> bool:
@@ -138,6 +147,7 @@ class SettingsStore:
             "watch_folder": settings.watch_folder,
             "window_geometry": settings.window_geometry,
             "hidden_albums": [list(pair) for pair in settings.hidden_albums],
+            "collapsed_sections": list(settings.collapsed_sections),
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.
         temp = CONFIG_FILE.with_suffix(".tmp")
