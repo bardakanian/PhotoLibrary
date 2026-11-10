@@ -9,7 +9,7 @@ from .constants import APP_DIR, CONFIG_FILE
 VIEW_MODES = ("years", "months", "all")
 TIME_FORMATS = ("system", "12", "24")
 SORT_ORDERS = ("newest", "oldest")
-SIDEBAR_SECTIONS = ("library", "folders", "albums", "hidden")
+SIDEBAR_SECTIONS = ("library", "folders", "people", "unnamed", "groups", "albums", "hidden", "hidden_people")
 MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 80, 320, 160
 
 
@@ -30,6 +30,8 @@ class AppSettings:
     hidden_albums: list[tuple[str, str]] = field(default_factory=list)
     # Sidebar sections the user folded away (keys from SIDEBAR_SECTIONS).
     collapsed_sections: list[str] = field(default_factory=list)
+    # Find faces and group them into People (core/faces.py). Off until the user turns it on.
+    find_people: bool = False
 
 
 def _hidden_albums(value) -> list[tuple[str, str]]:
@@ -111,6 +113,7 @@ class SettingsStore:
             window_geometry=str(data.get("window_geometry", "")),
             hidden_albums=_hidden_albums(data.get("hidden_albums")),
             collapsed_sections=_collapsed_sections(data.get("collapsed_sections")),
+            find_people=bool(data.get("find_people", False)),
         )
 
     def save(self, settings: AppSettings, ticket: int | None = None) -> bool:
@@ -148,6 +151,7 @@ class SettingsStore:
             "window_geometry": settings.window_geometry,
             "hidden_albums": [list(pair) for pair in settings.hidden_albums],
             "collapsed_sections": list(settings.collapsed_sections),
+            "find_people": settings.find_people,
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.
         temp = CONFIG_FILE.with_suffix(".tmp")

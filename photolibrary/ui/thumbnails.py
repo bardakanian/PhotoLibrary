@@ -7,6 +7,7 @@ away is dropped, so the pools always work on what is on screen first.
 """
 
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Signal, Slot
@@ -25,6 +26,10 @@ BUCKETS = (96, 160, 256, 384, 512)
 COVER_BUCKETS = (768, 1024, 1536)
 ALL_BUCKETS = BUCKETS + COVER_BUCKETS
 CACHE_BYTES = 480 * 1024 * 1024
+# A thumbnail that couldn't be made is tried again after this long: the file may have been on a
+# drive that was asleep or unplugged. (Files that really can't be read have a .failed marker on
+# disk, so trying again costs one file check.)
+FAILED_RETRY_SECONDS = 30.0
 
 
 def bucket_for(pixels: float, cover: bool = False) -> int:
@@ -71,7 +76,7 @@ class ThumbnailLoader(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cache: LRUCache[QPixmap] = LRUCache(CACHE_BYTES)
-        self._failed: set[tuple] = set()      # (id, modified_ns) with no possible thumbnail
+        self._failed: dict[tuple, float] = {}  # (id, modified_ns) -> when its thumbnail last failed
         self._requested: set[tuple] = set()   # keys queued or running, owned by the UI thread
         self._generation = 0
         self._signals = _Signals()
@@ -98,11 +103,17 @@ class ThumbnailLoader(QObject):
         return _thumb_key(item, bucket) in self.cache
 
     def is_unavailable(self, item: MediaItem) -> bool:
-        return (item.id, item.modified_ns) in self._failed
+        failed_at = self._failed.get((item.id, item.modified_ns))
+        if failed_at is None:
+            return False
+        if time.monotonic() - failed_at < FAILED_RETRY_SECONDS:
+            return True
+        del self._failed[(item.id, item.modified_ns)]  # worth another try
+        return False
 
     def request(self, item: MediaItem, bucket: int) -> None:
         key = _thumb_key(item, bucket)
-        if key in self._requested or key in self.cache or (item.id, item.modified_ns) in self._failed:
+        if key in self._requested or key in self.cache or self.is_unavailable(item):
             return
         self._requested.add(key)
         generation = self._generation
@@ -139,7 +150,7 @@ class ThumbnailLoader(QObject):
         self._requested.discard(key)
         item_id, modified_ns, _bucket = key
         if image is None:
-            self._failed.add((item_id, modified_ns))
+            self._failed[(item_id, modified_ns)] = time.monotonic()
         else:
             pixmap = QPixmap.fromImage(image)
             self.cache.put(key, pixmap, pixmap.width() * pixmap.height() * 4)
@@ -159,6 +170,12 @@ class ThumbnailLoader(QObject):
         if image is not None:
             self._emit(key, image, generation)
             return
+        if cached.exists():
+            # Damaged (say, cut short by a full disk): make it again rather than fail for good.
+            try:
+                cached.unlink()
+            except OSError:
+                pass
         # Not on disk yet: hand over to the slower pool that creates it.
         self._generate_queue.submit(key, lambda: self._generate_job(item, bucket, key, generation))
 

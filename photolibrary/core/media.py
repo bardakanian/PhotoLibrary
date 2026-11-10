@@ -62,6 +62,13 @@ def run_tool(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(args, **kwargs)
 
 
+def spawn_tool(args: list[str]) -> subprocess.Popen:
+    """subprocess.Popen without waiting, started the same fork-free way as run_tool."""
+    if os.name == "posix":
+        return subprocess.Popen([_tool_path(args[0]), *args[1:]], close_fds=False)
+    return subprocess.Popen(args)
+
+
 def media_type_for_path(path: Path) -> str:
     return "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image"
 
@@ -194,7 +201,9 @@ _VIDEO_SIZE = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 _ROTATION = re.compile(r"(?:rotate\s*:\s*|rotation of\s*)(-?\d+(?:\.\d+)?)")
 
 
-def _parse_ffmpeg_date(value: str) -> datetime | None:
+def _parse_ffmpeg_date(value: str, local: bool = False) -> datetime | None:
+    """A naive local datetime. With `local`, a time-zone offset is dropped instead of converted:
+    the value is the camera's own wall-clock time, as EXIF dates in photos are."""
     normalized = value.strip().replace("Z", "+00:00")
     for parser in (
         datetime.fromisoformat,
@@ -203,7 +212,9 @@ def _parse_ffmpeg_date(value: str) -> datetime | None:
     ):
         try:
             parsed = parser(normalized)
-            return parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed
+            if parsed.tzinfo is None:
+                return parsed
+            return parsed.replace(tzinfo=None) if local else parsed.astimezone().replace(tzinfo=None)
         except ValueError:
             continue
     return None
@@ -212,6 +223,7 @@ def _parse_ffmpeg_date(value: str) -> datetime | None:
 def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
     """Read date, size, duration and camera from `ffmpeg -i` output."""
     dates: list[str] = []
+    camera_date: str | None = None
     make = model = None
     live_motion = False
     width = height = None
@@ -223,7 +235,7 @@ def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
         key_lower = key.strip().lower()
         if key_lower == "com.apple.quicktime.creationdate":
             # The camera's own local capture time; container times may be the export time.
-            dates.insert(0, value.strip())
+            camera_date = camera_date or value.strip()
         elif "creation_time" in key_lower or key_lower in {"date", "date-eng", "creation date"}:
             dates.append(value.strip())
         elif key_lower in {"com.apple.quicktime.model", "model"}:
@@ -241,7 +253,9 @@ def parse_ffmpeg_probe(stderr: str) -> MediaMetadata:
             rotation = float(match.group(1))
     if width and height and round(abs(rotation)) % 180 == 90:
         width, height = height, width
-    captured = next((parsed for parsed in map(_parse_ffmpeg_date, filter(None, dates)) if parsed), None)
+    captured = _parse_ffmpeg_date(camera_date, local=True) if camera_date else None
+    if captured is None:
+        captured = next((parsed for parsed in map(_parse_ffmpeg_date, filter(None, dates)) if parsed), None)
     return MediaMetadata(captured, width, height, _camera_name(make, model), duration, live_motion)
 
 
@@ -429,7 +443,7 @@ def reveal_command(path: Path, platform: str = sys.platform) -> list[str]:
 
 def reveal_in_file_manager(path: Path) -> tuple[bool, str | None]:
     try:
-        subprocess.Popen(reveal_command(path))
+        spawn_tool(reveal_command(path))
         return True, None
     except OSError as exc:
         return False, str(exc)
@@ -438,11 +452,11 @@ def reveal_in_file_manager(path: Path) -> tuple[bool, str | None]:
 def open_in_default_app(path: Path) -> tuple[bool, str | None]:
     try:
         if sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
+            spawn_tool(["open", str(path)])
         elif os.name == "nt":
             os.startfile(str(path))
         else:
-            subprocess.Popen(["xdg-open", str(path)])
+            spawn_tool(["xdg-open", str(path)])
         return True, None
     except OSError as exc:
         return False, str(exc)

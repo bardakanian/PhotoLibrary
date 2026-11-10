@@ -16,8 +16,9 @@ def format_size(num_bytes: int | None) -> str:
     if num_bytes is None:
         return "—"
     value = float(num_bytes)
-    for unit in ("bytes", "KB", "MB", "GB"):
-        if value < 1000 or unit == "GB":
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        # Round first, so 999,999 bytes reads "1.0 MB", not "1000.0 KB".
+        if unit == "TB" or (value < 1000 if unit == "bytes" else round(value, 1) < 1000):
             return f"{int(value)} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
         value /= 1000
     return f"{value:.1f} TB"

@@ -1,16 +1,20 @@
-from datetime import datetime, timedelta
 import json
 import sys
+import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox
 
 from photolibrary.core import media
+from photolibrary.core.faces import FACES_ENABLED
 from photolibrary.ui.widgets.sidebar import CountRole, ScopeRole
 
+from ..fake_faces import FakeFaceEngine, write_people_photo
 from .base import WindowTestCase
 
 
@@ -477,3 +481,401 @@ class SidebarButtonTests(WindowTestCase):
         self.assertTrue(window.sidebar.isVisible() and button.isChecked())
         self.assertIn("Hide the sidebar", button.toolTip())
         self.assertLessEqual(window.compact_toolbar_width(), 900 if not sys.platform.startswith("win") else 1100)
+
+
+@unittest.skipUnless(FACES_ENABLED, "OpenCV is not installed")
+class PeopleWindowTests(WindowTestCase):
+    def build_extra_library(self):
+        start = datetime(2026, 3, 1, 12)
+        for index in range(7):
+            write_people_photo(self.library / "Family" / f"ana_{index}.jpg", start + timedelta(days=index), (1,))
+        for index in range(5):
+            write_people_photo(self.library / "Family" / f"ben_{index}.jpg", start + timedelta(days=10 + index), (2,))
+        self.expected_total = 26 + 12
+
+    def find_people(self, fold: bool = False):
+        window = self.window
+        if not fold:  # these test people are in fewer photos than the sidebar folds away
+            from photolibrary.ui.widgets import sidebar
+            folding = patch.object(sidebar, "FEW_PHOTOS", 0)
+            folding.start()
+            self.addCleanup(folding.stop)
+        window.face_engine_factory = lambda models: FakeFaceEngine()
+        window.settings.find_people = True
+        window.start_people()
+        self.wait_until(lambda: window.sidebar.unnamed_header.rowCount() == (1 if fold else 2), timeout=20,
+                        message="people listed")
+        return window.sidebar.unnamed_header  # nobody is named yet
+
+    def test_people_in_few_photos_are_folded_until_asked_for(self):
+        from photolibrary.ui.widgets.sidebar import MoreRole
+        header = self.find_people(fold=True)
+        tree = self.window.sidebar.tree
+        more = header.child(0)
+        self.assertTrue(more.data(MoreRole))
+        self.assertEqual(more.text(), "Show 2 More…")
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         tree.visualRect(more.index()).center())
+        self.assertEqual([header.child(row).data(CountRole) for row in range(2)], [7, 5])
+        self.assertEqual(header.child(2).text(), "Show Fewer")
+        ana = header.child(0).data(ScopeRole)[1]
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         tree.visualRect(header.child(2).index()).center())
+        # A named person is always listed, however few their photos.
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Ana", True)):
+            self.window.rename_person(ana)
+        named = self.window.sidebar.people_header
+        self.wait_until(lambda: named.rowCount() == 1 and named.child(0).text() == "Ana"
+                        and header.rowCount() == 1 and header.child(0).text() == "Show 1 More…",
+                        message="named person under People, the folded one under Unnamed People")
+
+    def test_people_is_off_until_turned_on(self):
+        self.assertFalse(self.window.settings.find_people)
+        self.window.start_people()
+        self.settle(0.3)
+        self.assertIsNone(self.window.sidebar.people_header.model())
+
+    def test_people_are_listed_and_open_their_photos(self):
+        header = self.find_people()
+        self.assertEqual([header.child(row).data(CountRole) for row in range(2)], [7, 5])
+        # Face pictures are cut from the largest grid thumbnail, so they stay sharp.
+        from photolibrary.ui.widgets.sidebar import FACE_BUCKET, CoverRole
+        cover = header.child(0).data(CoverRole)
+        self.window.sidebar.tree.viewport().repaint()
+        self.wait_until(lambda: self.window.loader.has_exact(cover, FACE_BUCKET), message="sharp face picture")
+        self.assertEqual(header.child(0).text(), "Unnamed person")
+        self.assertEqual(header.row(), self.window.sidebar.albums_header.row() - 1)  # just above Albums
+        self.assertIsNone(self.window.sidebar.people_header.model())  # no named people yet
+        person = header.child(0).data(ScopeRole)[1]
+        self.window.sidebar.select_scope("person", None, person)
+        self.wait_until(lambda: len(self.window.model.items) == 7, message="person's photos")
+        self.assertTrue(all(item.name.startswith("ana_") for item in self.window.model.items))
+        self.assertTrue(self.window.remove_from_person_action.isEnabled())
+        # Remove one photo from the person.
+        self.click_row(0)
+        self.window.remove_from_person()
+        self.wait_until(lambda: len(self.window.model.items) == 6, message="photo removed from person")
+
+    def test_rename_merge_and_hide(self):
+        header = self.find_people()
+        ana, ben = (header.child(row).data(ScopeRole)[1] for row in range(2))
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Ana", True)):
+            self.window.rename_person(ana)
+        named = self.window.sidebar.people_header
+        self.wait_until(lambda: named.rowCount() == 1 and named.child(0).text() == "Ana", message="renamed")
+        self.assertEqual(header.rowCount(), 1)  # Ben, still unnamed
+        self.window.set_person_hidden(ben, True)
+        self.wait_until(lambda: self.window.sidebar.hidden_people_header.rowCount() == 1, message="hidden")
+        self.assertIsNone(header.model())  # no unnamed people shown: the section goes
+        with patch.object(QMessageBox, "exec", lambda dialog: dialog.buttons()[0].click()):
+            self.window.merge_people(ana, ben)
+        self.wait_until(lambda: named.rowCount() == 1 and named.child(0).data(CountRole) == 12
+                        and self.window.sidebar.hidden_people_header.model() is None, message="merged")
+        self.assertEqual(named.child(0).text(), "Ana")
+
+    def loosen_faces(self, person_id: int, count: int) -> list[int]:
+        from photolibrary.core import database
+        connection = database.open_database()
+        try:
+            ids = [row[0] for row in connection.execute(
+                "SELECT id FROM faces WHERE person_id = ? ORDER BY id LIMIT ?", (person_id, count))]
+            connection.executemany("UPDATE faces SET person_id = NULL WHERE id = ?", [(face_id,) for face_id in ids])
+            connection.commit()
+        finally:
+            connection.close()
+        return ids
+
+    def face_rows(self, face_ids):
+        from photolibrary.core import database
+        connection = database.open_database()
+        try:
+            return {face_id: connection.execute("SELECT person_id, pinned FROM faces WHERE id = ?", (face_id,)).fetchone()
+                    for face_id in face_ids}
+        finally:
+            connection.close()
+
+    def test_review_asks_about_loose_faces_and_keeps_the_answers(self):
+        from photolibrary.ui.widgets.sidebar import ReviewRole
+        header = self.find_people()
+        ana = header.child(0).data(ScopeRole)[1]
+        self.loosen_faces(ana, 3)
+        self.window.reload_sidebar()
+        header = self.window.sidebar.people_header  # Review Suggestions sits at the top of People
+        self.settle()
+        self.assertIsNone(header.model())  # nobody named yet, so nothing to suggest
+        self.window.repository.rename_person(ana, "Ana")
+        self.window.reload_sidebar()
+        self.wait_until(lambda: header.rowCount() and header.child(0).data(ReviewRole)
+                        and header.child(0).data(CountRole) == 3, message="review row with 3 suggestions")
+        # Clicking the row opens the page, without changing what the grid shows.
+        scope = self.window.sidebar.scope
+        tree = self.window.sidebar.tree
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         tree.visualRect(header.child(0).index()).center())
+        review = self.window.review
+        self.wait_until(lambda: self.window.review_active and len(review.suggestions) == 3, message="suggestions")
+        self.assertEqual(self.window.sidebar.scope, scope)
+        self.assertIn("Is this", review.question.text())
+        first, second = review.suggestions[0].face_id, review.suggestions[1].face_id
+        QTest.keyClick(review, Qt.Key.Key_Y)
+        QTest.keyClick(review, Qt.Key.Key_N)
+        QTest.keyClick(review, Qt.Key.Key_Right)  # skip the third
+        self.assertEqual(review.empty.title_label.text(), "All caught up")
+        self.wait_until(lambda: self.face_rows([first, second]) == {first: (ana, 1), second: (None, 0)},
+                        message="answers saved")
+        QTest.keyClick(review, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.review_active)
+        # The rejected face isn't suggested again; the skipped one still is.
+        self.wait_until(lambda: header.child(0).data(ReviewRole) and header.child(0).data(CountRole) == 1,
+                        message="one suggestion left")
+
+    def test_viewer_shows_faces_and_fixes_one_face(self):
+        header = self.find_people()
+        ana = header.child(0).data(ScopeRole)[1]
+        # From All Photos, so the photo stays on screen after its face leaves the person.
+        row = next(row for row, item in enumerate(self.window.model.items) if item.name == "ana_6.jpg")
+        viewer = self.window.viewer
+        self.window.open_viewer(row)
+        self.assertTrue(viewer.faces_button.isVisible())
+        viewer.faces_button.setChecked(True)
+        self.wait_until(lambda: len(viewer.faces) == 1 and viewer.canvas.face_rects(), message="face shown")
+        face = viewer.faces[0]
+        self.assertEqual(face.person_id, ana)
+        rect = viewer.canvas.face_rects()[0]
+        self.assertTrue(viewer.canvas.rect().contains(rect.center().toPoint()))
+        shown = []
+
+        def capture(menu, *args):
+            shown.append([action.text() for action in menu.actions()])
+            next(action for action in menu.actions() if action.text().startswith("Not ")).trigger()
+
+        with patch.object(self.window, "_exec_menu", capture):
+            QTest.mouseClick(viewer.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             rect.center().toPoint())
+        self.assertIn("New Person…", shown[0])
+        self.wait_until(lambda: viewer.faces and viewer.faces[0].person_id is None, message="face taken out")
+        self.assertIsNone(self.face_rows([face.id])[face.id][0])
+        # Name it as somebody new instead.
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Dana", True)):
+            self.window._name_face(viewer.faces[0])
+        self.wait_until(lambda: viewer.faces and viewer.faces[0].name == "Dana" and viewer.faces[0].confirmed,
+                        message="named Dana")
+        # Turning faces off clears them; another photo loads its own.
+        viewer.faces_button.setChecked(False)
+        self.assertEqual(viewer.canvas.face_rects(), [])
+
+    def test_check_faces_puts_the_least_typical_first(self):
+        import numpy as np
+        from photolibrary.core import database
+        from ..fake_faces import person_vector
+        header = self.find_people()
+        ana = header.child(0).data(ScopeRole)[1]
+        connection = database.open_database()
+        try:  # one of Ana's faces looks a little different
+            face_id, blob, odd = connection.execute(
+                "SELECT faces.id, faces.embedding, media.file_path FROM faces JOIN media ON media.id = faces.media_id "
+                "WHERE faces.person_id = ? AND media.file_name = 'ana_2.jpg'", (ana,)).fetchone()
+            vector = np.frombuffer(blob, dtype=np.float32) + person_vector(40) * 0.8
+            connection.execute("UPDATE faces SET embedding = ? WHERE id = ?",
+                               ((vector / np.linalg.norm(vector)).astype(np.float32).tobytes(), face_id))
+            connection.commit()
+        finally:
+            connection.close()
+        window = self.window
+        window.check_person(ana)
+        self.wait_until(lambda: window.model.items and window.model.items[0].name == "ana_2.jpg"
+                        and len(window.model.items) == 7, message="least typical first")
+        self.assertEqual([section.title for section in window.model.sections],
+                         ["Least typical first  ·  wrong matches gather here"])
+        self.assertTrue(window.least_typical_action.isChecked())
+        window.set_view_mode("months")  # Years and Months are by date: the check turns off
+        self.assertFalse(window.least_typical)
+        window.set_view_mode("all")
+        self.wait_until(lambda: window.model.sections and "Least" not in window.model.sections[0].title,
+                        message="back to months")
+        window.check_person(ana)
+        self.wait_until(lambda: window.least_typical and window.model.items[0].name == "ana_2.jpg", message="on again")
+        window.sidebar.select_scope("all", None, None)  # leaving the person turns it off
+        self.assertFalse(window.least_typical or window.least_typical_action.isEnabled())
+
+    def test_removing_a_wrong_photo_from_a_person(self):
+        header = self.find_people()
+        ana = header.child(0).data(ScopeRole)[1]
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Ana", True)):
+            self.window.rename_person(ana)
+        named = self.window.sidebar.people_header
+        self.wait_until(lambda: named.rowCount() and named.child(0).text() == "Ana", message="named")
+        self.window.sidebar.select_scope("person", None, ana)
+        self.wait_until(lambda: len(self.window.model.items) == 7, message="Ana's photos")
+        self.assertEqual(self.window.remove_from_person_action.text(), "Remove from Ana")
+        self.assertEqual(self.window.remove_from_person_action.shortcut().toString(), QKeySequence("Alt+Backspace").toString())
+        # Right-click two selected photos: "Not Ana – Remove 2 Photos from Ana".
+        self.click_row(0)
+        self.click_row(1, Qt.KeyboardModifier.ControlModifier)
+        wrong = {item.id for item in self.window.selected_items()}
+        shown = []
+
+        def choose(menu, *args):
+            shown.append([action.text() for action in menu.actions()])
+            next(action for action in menu.actions() if action.text().startswith("Not Ana")).trigger()
+
+        with patch.object(self.window, "_exec_menu", choose):
+            self.window._grid_context_menu(self.view.visualRect(self.window.model.index(0, 0)).center())
+        self.assertIn("Not Ana – Remove 2 Photos from Ana", shown[0])
+        self.wait_until(lambda: len(self.window.model.items) == 5, message="two photos removed")
+        self.assertFalse(wrong & {item.id for item in self.window.model.items})
+        self.assertEqual(self.window.status.text(), "Removed 2 photos from Ana")
+        # In the viewer, the shortcut removes the photo being viewed.
+        self.window.open_viewer(0)
+        viewing = self.window.viewer.current_item.id
+        self.assertEqual(self.window.scope_kind, "person")  # a sidebar reload used to reset this to All Photos
+        self.window.remove_from_person_action.trigger()
+        self.wait_until(lambda: viewing not in {item.id for item in self.window.model.items}, message="viewer photo removed")
+
+    def test_unnamed_people_fold_away_on_their_own(self):
+        unnamed = self.find_people()
+        ana = unnamed.child(0).data(ScopeRole)[1]
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Ana", True)):
+            self.window.rename_person(ana)
+        named = self.window.sidebar.people_header
+        self.wait_until(lambda: named.rowCount() == 1, message="Ana under People")
+        tree = self.window.sidebar.tree
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         tree.visualRect(unnamed.index()).center())
+        self.assertFalse(tree.isExpanded(unnamed.index()))
+        self.assertTrue(tree.isExpanded(named.index()))  # named people stay in view
+        self.wait_until(lambda: "unnamed" in json.loads(self.config_file.read_text()).get("collapsed_sections", []),
+                        message="folded section saved")
+        self.window.reload_sidebar()
+        self.settle(0.3)
+        self.assertFalse(tree.isExpanded(unnamed.index()))
+
+
+@unittest.skipUnless(FACES_ENABLED, "OpenCV is not installed")
+class PeopleGroupWindowTests(WindowTestCase):
+    def build_extra_library(self):
+        start = datetime(2026, 4, 1, 12)
+        for index, people in enumerate([(1,)] * 5 + [(2,)] * 4 + [(1, 2)] * 3):
+            write_people_photo(self.library / "Family" / f"g{index:02d}.jpg", start + timedelta(days=index), people)
+        self.expected_total = 26 + 12
+
+    def setUp(self):
+        super().setUp()
+        from photolibrary.ui.widgets import sidebar
+        folding = patch.object(sidebar, "FEW_PHOTOS", 0)
+        folding.start()
+        self.addCleanup(folding.stop)
+        window = self.window
+        window.face_engine_factory = lambda models: FakeFaceEngine()
+        window.settings.find_people = True
+        window.new_group_action.setEnabled(True)
+        window.start_people()
+        self.wait_until(lambda: window.sidebar.unnamed_header.rowCount() == 2, timeout=20, message="people listed")
+        self.first, self.second = (window.sidebar.unnamed_header.child(row).data(ScopeRole)[1] for row in range(2))
+
+    def test_a_group_shows_the_photos_of_everyone_together(self):
+        window, groups = self.window, self.window.sidebar.groups_header
+        self.assertIsNone(groups.model())  # no Groups section until there is a group
+        with patch.object(window, "_open_group_dialog", return_value=("Family", [self.first, self.second])):
+            window.new_group([self.first])
+        self.wait_until(lambda: groups.rowCount() == 1 and window.scope_kind == "group", message="group created and shown")
+        self.assertEqual(groups.row(), window.sidebar.unnamed_header.row() + 1)  # right after the people
+        self.assertEqual((groups.child(0).text(), groups.child(0).data(CountRole)), ("Family", 3))
+        self.wait_until(lambda: len(window.model.items) == 3, message="photos together")
+        self.assertTrue(all(item.name in {"g09.jpg", "g10.jpg", "g11.jpg"} for item in window.model.items))
+        self.assertEqual(window.folder_status.text().split("  ·  ")[0], "Family")
+        # Rename, then take a member out: a group of one person shows all their photos.
+        with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Us", True)):
+            window.rename_group(groups.child(0).data(ScopeRole)[1])
+        self.wait_until(lambda: groups.rowCount() and groups.child(0).text() == "Us", message="renamed")
+        group = groups.child(0).data(ScopeRole)[1]
+        with patch.object(window, "_open_group_dialog", return_value=("Us", [self.first])):
+            window.edit_group(group)
+        self.wait_until(lambda: len(window.model.items) == 8, message="one member's photos")
+        self.assertEqual(window.scope_kind, "group")  # a sidebar refresh keeps the group selected
+        def confirm(dialog):
+            next(button for button in dialog.buttons() if button.text() == "Delete Group").click()
+
+        with patch.object(QMessageBox, "exec", confirm):
+            window.delete_group(group)
+        self.wait_until(lambda: groups.model() is None and window.scope_kind == "all", message="deleted")
+        self.assertEqual(window.sidebar.unnamed_header.rowCount(), 2)  # people untouched
+
+    def test_the_dialog_needs_a_name_and_two_people(self):
+        from PySide6.QtWidgets import QDialogButtonBox
+        from photolibrary.ui.dialogs import GroupDialog
+        dialog = GroupDialog(self.window.people_list, selected=[self.first])
+        save = dialog.buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.assertFalse(save.isEnabled())
+        dialog.name.setText("Family")
+        self.assertFalse(save.isEnabled())  # still only one person
+        for row in range(dialog.list.count()):
+            dialog.list.item(row).setCheckState(Qt.CheckState.Checked)
+        self.assertTrue(save.isEnabled())
+        self.assertEqual(sorted(dialog.selected_members), sorted([self.first, self.second]))
+        dialog.deleteLater()
+
+
+
+class FullPageTests(WindowTestCase):
+    def test_insights_and_review_keep_the_grid_controls_away(self):
+        window = self.window
+        window.view.selectAll()
+        window.show_insights()
+        self.assertEqual(window.target_items(), [])  # ⌘⌫ can't trash a selection that isn't on screen
+        window.toggle_sidebar()
+        window.toggle_info()
+        self.assertFalse(window.sidebar.isVisible())
+        self.assertFalse(window.info_panel.isVisible())
+        window.close_insights()
+        self.assertFalse(window.sidebar.isVisible())  # the sidebar setting was turned off meanwhile
+        self.assertTrue(window.info_panel.isVisible())
+        window.toggle_sidebar()
+        self.assertTrue(window.sidebar.isVisible())
+
+    def test_open_viewer_is_ignored_on_the_review_page(self):
+        window = self.window
+        window.settings.find_people = True
+        window.view.setCurrentIndex(window.model.index(0, 0))
+        window.show_review()
+        window.open_current()
+        self.assertTrue(window.review_active)
+
+    def test_closing_the_viewer_brings_the_info_panel_back(self):
+        window = self.window
+        window.toggle_info()
+        window.info_panel.hide()  # as the Review page leaves it
+        window.open_viewer(0)
+        window.close_viewer()
+        self.assertTrue(window.info_panel.isVisible())
+
+
+class QueryTaskTests(WindowTestCase):
+    def test_queries_dropped_from_the_queue_are_not_kept_alive(self):
+        from photolibrary.ui import tasks
+        window = self.window
+        for _ in range(20):
+            window.reload_library()
+        self.wait_until(lambda: window.applied_request_id == window.query_request_id, message="last query applied")
+        self.settle()
+        self.assertFalse([task for task in tasks._active if task.pool is window.query_pool])
+
+
+class ThumbnailRetryTests(WindowTestCase):
+    def test_a_failed_thumbnail_is_tried_again_later(self):
+        from photolibrary.ui import thumbnails
+        loader, item = self.window.loader, self.window.model.items[0]
+        loader._failed[(item.id, item.modified_ns)] = thumbnails.time.monotonic()
+        self.assertTrue(loader.is_unavailable(item))
+        loader._failed[(item.id, item.modified_ns)] -= thumbnails.FAILED_RETRY_SECONDS + 1
+        self.assertFalse(loader.is_unavailable(item))  # the drive may be back: worth another try
+
+    def test_a_damaged_cached_thumbnail_is_made_again(self):
+        from photolibrary.ui.thumbnails import THUMBNAIL_EDGE
+        loader, item = self.window.loader, self.window.model.items[0]
+        cached = media.get_cached_thumbnail(item.path, "image", item.file_size, item.modified_ns, THUMBNAIL_EDGE)
+        cached.write_bytes(b"\xff\xd8 cut short")
+        loader.reset()
+        loader.request(item, 96)
+        self.wait_until(lambda: loader.has_exact(item, 96) or loader.is_unavailable(item), message="loaded")
+        self.assertTrue(loader.has_exact(item, 96))

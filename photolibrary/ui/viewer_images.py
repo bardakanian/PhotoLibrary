@@ -40,6 +40,22 @@ def decode_display_image(path: Path, max_edge: int | None) -> QImage | None:
     return QImage(data, pil_image.width, pil_image.height, pil_image.width * channels, image_format).copy()
 
 
+def decode_for_faces(path: Path, max_edge: int):
+    """A PIL image for face analysis, decoded by the system (fast, downscaled HEIC). Thread-safe.
+
+    None if the photo can't be decoded.
+    """
+    from PIL import Image
+
+    image = decode_display_image(path, max_edge)
+    if image is None:
+        return None
+    image = image.convertToFormat(QImage.Format.Format_RGB888)
+    width, height, stride = image.width(), image.height(), image.bytesPerLine()
+    return Image.frombuffer("RGB", (width, height), bytes(image.constBits())[:stride * height], "raw", "RGB",
+                            stride, 1).copy()
+
+
 class _Signals(QObject):
     loaded = Signal(object, object)  # key, QImage | None
 

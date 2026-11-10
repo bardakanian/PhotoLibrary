@@ -7,7 +7,7 @@ from PySide6.QtCore import QByteArray, QFile, QObject, QThreadPool, QTimer, Qt, 
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QMenu, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QApplication, QInputDialog, QMenu, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle, QVBoxLayout, QWidget,
 )
 
@@ -18,6 +18,9 @@ from ..core.library_roots import root_conflict
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
 from ..core import media as media_module
 from ..core.cache_cleanup import prune_thumbnail_cache
+from ..core import database as database_module
+from ..core.faces import FACES_ENABLED, ModelError, OpenCVFaceEngine, ensure_models, models_present
+from ..core.people import run_people_pass
 from ..core.constants import APP_NAME, COVER_EDGE, VERSION
 from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
@@ -25,20 +28,22 @@ from ..core.watcher import LibraryWatcher
 from ..core.formatting import format_size
 from ..core.search import SearchFilter, parse_query
 from ..core.settings import MAX_ZOOM, MIN_ZOOM, SettingsStore
-from .dialogs import PreferencesDialog
+from .dialogs import GroupDialog, PreferencesDialog
 from .grid_model import GridModel
 from .grid_view import MediaGridView
 from .pages.grid_page import GridPage
 from .pages.insights_page import LibraryInsightsPage
+from .pages.review_page import ReviewPage
 from .pages.viewer_page import ViewerPage
-from .tasks import run_async
+from .tasks import cancel_queued, run_async
 from .theme import ThemeManager
 from .thumbnails import ThumbnailLoader
 from .time_format import uses_12_hour
 from .widgets import SearchBox
+from .viewer_images import decode_for_faces
 from .widgets.common import sidebar_icon
 from .widgets.info_panel import REVEAL_LABEL, InfoPanel
-from .widgets.sidebar import Sidebar
+from .widgets.sidebar import UNNAMED, Sidebar
 
 LOGGER = logging.getLogger(__name__)
 MODE_LABELS = (("years", "Years"), ("months", "Months"), ("all", "All Photos"))
@@ -66,6 +71,7 @@ class MainWindow(QMainWindow):
         self.io_pool = QThreadPool(self)
         self.io_pool.setMaxThreadCount(2)
         self.query_request_id = 0
+        self.applied_request_id = 0  # the newest query whose result the grid shows (or that failed)
         self.snapshot: LibrarySnapshot | None = None
         self._viewer_return: tuple[int | None, int] = (None, 0)  # (opened item id, grid scroll value)
 
@@ -93,6 +99,13 @@ class MainWindow(QMainWindow):
         self.watch_retry.setInterval(30_000)
         self.watch_retry.timeout.connect(self.start_watching)
         self.warm_id = 0
+        # People: finding faces runs after warming, and pauses for scans and video like warming.
+        self.people_events = IndexEvents()
+        self.people_events.received.connect(self._handle_people_event)
+        self.people_stop = threading.Event()
+        self.people_pending = False
+        self.people_id = 0
+        self.face_engine_factory = OpenCVFaceEngine  # called with the models folder; tests use a fake
         self.ready_text = "Ready"
         self.scan_notes: list[str] = []  # "3 new or changed" and so on, from the last scan
         self.library_totals: tuple[int, int] | None = None  # (shown, hidden) items, from the sidebar query
@@ -290,6 +303,9 @@ class MainWindow(QMainWindow):
         self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
         self.viewer.closed.connect(self.close_viewer)
         self.viewer.open_externally_requested.connect(self.open_in_default_app)
+        self.viewer.faces_needed.connect(self._load_faces)
+        self.viewer.face_menu_requested.connect(self._face_menu)
+        self.viewer.set_faces_available(self.settings.find_people)
         self.viewer.video.player.playbackStateChanged.connect(self._playback_state_changed)
         self.viewer.current_changed.connect(lambda item: self.info_panel.show_items([item]))
         self.viewer_info_button = QPushButton("ⓘ")
@@ -303,6 +319,14 @@ class MainWindow(QMainWindow):
         self.viewer.top_bar_layout.addWidget(self.viewer_info_button)
         self.insights = LibraryInsightsPage(self.theme.colors)
         self.insights.back_requested.connect(self.close_insights)
+        self.review = ReviewPage(self.loader, self.theme)
+        self.review.back_requested.connect(self.close_review)
+        self.review.answered.connect(self._review_answered)
+        self.people_list: list = []  # the latest people shown in the sidebar (their covers, for Review)
+        self.review_request_id = 0
+        self.select_group_after_reload: int | None = None  # a group just created, shown once listed
+        self.groups_list: list = []  # the latest groups shown in the sidebar
+        self.least_typical = False  # a person's photos, least typical face first (for checking)
         self.insights.choose_folder_requested.connect(self.add_folder)
         self.insights.rescan_requested.connect(self.start_indexing)
         self.insights.retry_requested.connect(self.load_insights)
@@ -311,11 +335,23 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.viewer)
         self.stack.addWidget(self.insights)
+        self.stack.addWidget(self.review)
         self.sidebar = Sidebar(self.loader, self.theme)
         self.sidebar.scope_changed.connect(self.set_scope)
         self.sidebar.add_folder_requested.connect(self.add_folder)
         self.sidebar.hide_album_requested.connect(self.set_album_hidden)
         self.sidebar.remove_folder_requested.connect(lambda root: self.remove_folder(Path(root)))
+        self.sidebar.rename_person_requested.connect(self.rename_person)
+        self.sidebar.merge_people_requested.connect(self.merge_people)
+        self.sidebar.hide_person_requested.connect(self.set_person_hidden)
+        self.sidebar.review_requested.connect(self.show_review)
+        self.sidebar.check_person_requested.connect(self.check_person)
+        self.sidebar.new_group_requested.connect(self.new_group)
+        self.sidebar.edit_group_requested.connect(self.edit_group)
+        self.sidebar.rename_group_requested.connect(self.rename_group)
+        self.sidebar.delete_group_requested.connect(self.delete_group)
+        self.sidebar.add_to_group_requested.connect(
+            lambda group, person: self._change_people(lambda repository: repository.add_to_group(group, person)))
         self.sidebar.setVisible(self.settings.sidebar_visible)
         self.sidebar.set_collapsed(self.settings.collapsed_sections)
         self.sidebar.collapsed_changed.connect(self._sidebar_sections_changed)
@@ -380,6 +416,9 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         trash = action(edit_menu, "Move to Trash…", "Ctrl+Backspace", self.move_to_trash)
         trash.setShortcuts([QKeySequence("Ctrl+Backspace"), QKeySequence(QKeySequence.StandardKey.Delete)])
+        self.remove_from_person_action = action(edit_menu, "Remove from This Person", "Alt+Backspace",
+                                                self.remove_from_person)
+        self.remove_from_person_action.setEnabled(False)
         edit_menu.addSeparator()
         action(edit_menu, "Find…", QKeySequence.StandardKey.Find, self.focus_search)
         action(edit_menu, "Clear Search", "", self.clear_search)
@@ -389,6 +428,13 @@ class MainWindow(QMainWindow):
         self.sidebar_action.setChecked(self.settings.sidebar_visible)
         self.info_action = action(view_menu, "Show Info", "Ctrl+I", self.toggle_info, checkable=True)
         action(view_menu, "Library Insights", "Ctrl+Shift+I", self.show_insights)
+        self.review_action = action(view_menu, "Review People…", "Ctrl+Shift+P", self.show_review)
+        self.least_typical_action = action(view_menu, "Least Typical Faces First", "",
+                                           lambda checked: self.set_least_typical(checked), checkable=True)
+        self.least_typical_action.setEnabled(False)
+        self.new_group_action = action(view_menu, "New Group…", "", lambda: self.new_group([]))
+        self.new_group_action.setEnabled(self.settings.find_people)
+        self.review_action.setEnabled(self.settings.find_people)
         self.info_action.setChecked(self.settings.info_panel_visible)
         view_menu.addSeparator()
         self.mode_actions = QActionGroup(self)
@@ -518,6 +564,7 @@ class MainWindow(QMainWindow):
         # Stop the scan first, so it doesn't write rows for the folder after they are removed.
         self.stop_event.set()
         self.stop_warming()
+        self.stop_people()
         self.settings.library_folders = [root for root in self.roots if root != folder]
         self.settings.hidden_albums = [entry for entry in self.hidden_albums if entry[0] != str(folder)]
         self._save_settings()
@@ -576,6 +623,7 @@ class MainWindow(QMainWindow):
             return
         self.pending_index_start = False
         self.stop_warming()  # leave the disk and CPU to the scan; warming restarts afterwards
+        self.stop_people()
         self.active_scan_id += 1
         self.stop_event = threading.Event()
         roots, stop, scan_id, emit = self.roots, self.stop_event, self.active_scan_id, self.index_events.received.emit
@@ -632,10 +680,9 @@ class MainWindow(QMainWindow):
                 if event.get("unreadable"):
                     count = event["unreadable"]
                     parts.append(f"{count:,} folder{'s' if count != 1 else ''} couldn't be read")
-                unavailable = event.get("missing_folders", []) + event.get("failed_folders", [])
-                if unavailable:
-                    names = ", ".join(f"“{Path(folder).name}”" for folder in unavailable)
-                    parts.append(f"not found: {names}" if not event.get("failed_folders") else f"couldn't scan: {names}")
+                for key, label in (("missing_folders", "not found"), ("failed_folders", "couldn't scan")):
+                    if event.get(key):
+                        parts.append(f"{label}: " + ", ".join(f"“{Path(folder).name}”" for folder in event[key]))
                 self.scan_notes = parts
                 # The scan counts every file; the sidebar query then corrects this for hidden albums.
                 self.library_totals = None if self.hidden_albums else (event["total_indexed"], 0)
@@ -670,8 +717,20 @@ class MainWindow(QMainWindow):
 
     def query_arguments(self) -> dict:
         search = self.search_filter if self.search_filter and not self.search_filter.is_empty else None
-        return {"kind": self.scope_kind, "album": self.scope_album, "search": search,
-                "oldest_first": self.settings.sort_order == "oldest", "hidden": self.hidden_albums}
+        person = self.scope_album if self.scope_kind == "person" else None
+        group = self.scope_album if self.scope_kind == "group" else None
+        by_face = person is not None or group is not None
+        return {"kind": "all" if by_face else self.scope_kind,
+                "album": None if by_face else self.scope_album, "person": person, "group": group, "search": search,
+                "oldest_first": self.settings.sort_order == "oldest", "hidden": self.hidden_albums,
+                "least_typical_first": self.least_typical and person is not None}
+
+    @property
+    def single_section(self) -> str | None:
+        """The grid's one heading while checking a person's faces (instead of months)."""
+        if self.least_typical and self.scope_kind == "person":
+            return "Least typical first  ·  wrong matches gather here"
+        return None
 
     def refresh_library(self, keep_position: bool = True) -> None:
         """Reload the grid and the sidebar's counts and albums."""
@@ -686,11 +745,12 @@ class MainWindow(QMainWindow):
             self._apply_snapshot(None, request_id, keep_position)
             return
         arguments = self.query_arguments()
+        single_section = self.single_section
         repository = self.repository
-        self.query_pool.clear()
+        cancel_queued(self.query_pool)
         run_async(
             self.query_pool,
-            lambda: build_snapshot(repository.query(folders, **arguments)),
+            lambda: build_snapshot(repository.query(folders, **arguments), single_section),
             lambda snapshot: self._apply_snapshot(snapshot, request_id, keep_position),
             lambda error: self._query_failed(error, request_id),
         )
@@ -702,17 +762,31 @@ class MainWindow(QMainWindow):
             return
         repository = self.repository
         hidden = self.hidden_albums
+        find_people = self.settings.find_people
 
         def load():
             per_folder = ({str(root): repository.counts(root, hidden)["all"] for root in roots}
                           if len(roots) > 1 else {})
             everything = repository.counts(roots)["all"] if hidden else None
-            return repository.counts(roots, hidden), per_folder, repository.albums(roots), everything
+            people = repository.people(roots, hidden) if find_people else []
+            suggestions = len(repository.face_suggestions(roots, hidden)) if people else 0
+            groups = repository.person_groups(roots, hidden) if find_people else []
+            return (repository.counts(roots, hidden), per_folder, repository.albums(roots), everything, people,
+                    suggestions, groups)
 
         def apply(result):
             if roots != self.roots or hidden != self.hidden_albums:
                 return
-            counts, per_folder, albums, everything = result
+            counts, per_folder, albums, everything, people, suggestions, groups = result
+            self.people_list = people
+            self.sidebar.set_people(people, suggestions)
+            self.groups_list = groups
+            self.sidebar.set_groups(groups)
+            if self.select_group_after_reload is not None:
+                group, self.select_group_after_reload = self.select_group_after_reload, None
+                self.sidebar.select_scope("group", None, group)
+            if self.scope_kind == "person":  # the person may have been renamed
+                self.remove_from_person_action.setText(f"Remove from {self.sidebar.person_name(self.scope_album)}")
             shown = counts.get("all", 0)
             self.library_totals = (shown, everything - shown if everything is not None else 0)
             self._update_ready_text()
@@ -762,7 +836,14 @@ class MainWindow(QMainWindow):
         """Show a library kind (all, photos, videos), one library folder, or one album of a folder."""
         if self.viewer_active:
             self.close_viewer()
+        if (kind, album) != (self.scope_kind, self.scope_album):
+            self.least_typical = False  # checking applies to one person at a time
+            self.least_typical_action.setChecked(False)
         self.scope_kind, self.scope_root, self.scope_album = kind, root, album
+        self.remove_from_person_action.setEnabled(kind == "person")
+        self.remove_from_person_action.setText(
+            f"Remove from {self.sidebar.person_name(album)}" if kind == "person" else "Remove from This Person")
+        self.least_typical_action.setEnabled(kind == "person")
         self.reload_library(keep_position=False)
 
     # Search --------------------------------------------------------------
@@ -778,6 +859,7 @@ class MainWindow(QMainWindow):
         if self.viewer_active:
             self.close_viewer()
         self.close_insights()
+        self.close_review()
         self.search_box.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.search_box.selectAll()
 
@@ -818,19 +900,21 @@ class MainWindow(QMainWindow):
         for control in (self.sidebar_action, self.sidebar_button):
             control.setChecked(visible)
         self.sidebar_button.setToolTip("Hide the sidebar (⌥⌘S)" if visible else "Show the sidebar (⌥⌘S)")
-        if not self.viewer_active:
+        if not self.full_page_active:
             self.sidebar.setVisible(self.settings.sidebar_visible)
         self.settings_timer.start()
 
     def _query_failed(self, error: Exception, request_id: int) -> None:
         if request_id != self.query_request_id:
             return
+        self.applied_request_id = request_id
         LOGGER.error("Library query failed", exc_info=error)
         self.status.setText("The library index could not be read. Try rescanning.")
 
     def _apply_snapshot(self, snapshot: LibrarySnapshot | None, request_id: int, keep_position: bool = True) -> None:
         if request_id != self.query_request_id:
             return
+        self.applied_request_id = request_id
         anchor = self._anchor_item() if keep_position else None
         self.snapshot = snapshot
         self.model.set_snapshot(snapshot)
@@ -882,6 +966,14 @@ class MainWindow(QMainWindow):
                 self.grid_page.show_empty(f"No results for “{self.search_filter.text}”{where}",
                                           "Try a different filename, or a date such as 2023, May 2023 or 2023-05-14.",
                                           "Clear Search", "clear_search")
+            elif self.scope_kind == "group":
+                self.grid_page.show_empty("No photos of them together",
+                                          f"No shown photos have everyone in “{self.scope_label}” in them.",
+                                          "Show All Photos", "show_all")
+            elif self.scope_kind == "person":
+                self.grid_page.show_empty("No photos of this person",
+                                          f"No shown photos of “{self.scope_label}” match.",
+                                          "Show All Photos", "show_all")
             elif self.scope_album is not None:
                 self.grid_page.show_empty("This album is empty",
                                           f"There are no photos or videos in “{self.scope_album}” any more.",
@@ -910,6 +1002,10 @@ class MainWindow(QMainWindow):
 
     @property
     def scope_label(self) -> str:
+        if self.scope_kind == "person":
+            return self.sidebar.person_name(self.scope_album)
+        if self.scope_kind == "group":
+            return self.sidebar.group_name(self.scope_album)
         if self.scope_album is not None:
             return self.scope_album
         if self.scope_root is not None:
@@ -928,6 +1024,12 @@ class MainWindow(QMainWindow):
         if self.viewer_active:
             self.close_viewer()
         self.close_insights()
+        self.close_review()
+        if mode != "all" and self.least_typical:
+            # Years and Months group by date, which the least-typical order doesn't have.
+            self.least_typical = False
+            self.least_typical_action.setChecked(False)
+            self.reload_library(keep_position=False)
         if focus_index is None:
             focus_index = self._focused_item_index()
         if mode != self.model.mode:
@@ -1037,9 +1139,14 @@ class MainWindow(QMainWindow):
     def viewer_active(self) -> bool:
         return self.stack.currentWidget() is self.viewer
 
+    @property
+    def full_page_active(self) -> bool:
+        """The viewer, Insights or Review fills the window (no toolbar or sidebar)."""
+        return self.stack.currentWidget() is not self.grid_page
+
     def open_current(self) -> None:
         index = self.view.currentIndex()
-        if not self.viewer_active and not self.insights_active and index.isValid():
+        if not (self.viewer_active or self.insights_active or self.review_active) and index.isValid():
             self._open_index(index)
 
     def open_viewer(self, row: int) -> None:
@@ -1049,6 +1156,7 @@ class MainWindow(QMainWindow):
         self.toolbar.hide()
         self.sidebar.hide()
         self.stack.setCurrentWidget(self.viewer)
+        self.viewer.set_faces_available(self.settings.find_people and FACES_ENABLED)
         self.viewer.show_items(self.model.items, row)
 
     def close_viewer(self) -> None:
@@ -1059,6 +1167,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.grid_page)
         self.toolbar.show()
         self.sidebar.setVisible(self.settings.sidebar_visible)
+        self.info_panel.setVisible(self.settings.info_panel_visible)
         self.info_timer.start()
         row = self.model.row_for_item_id(item.id) if item else None
         if row is not None:
@@ -1190,8 +1299,13 @@ class MainWindow(QMainWindow):
             if self.warm_pending:
                 self.stop_warming()  # stays pending; resumes when playback stops
                 self.progress.hide()
+            if self.people_pending:
+                self.stop_people()
+                self.progress.hide()
         elif self.warm_pending and not self.scanning:
             self.start_warming()
+        elif self.people_pending and not self.scanning:
+            self.start_people()
 
     def _handle_warm_event(self, event: dict) -> None:
         if event.get("id") != self.warm_id or self.scanning:
@@ -1219,10 +1333,305 @@ class MainWindow(QMainWindow):
                 notes.append(f"freed {format_size(pruned.freed_bytes)} of old thumbnails")
             if notes:
                 self.status.setText(self.ready_text + "  ·  " + "  ·  ".join(notes))
+            self.start_people()
         else:
             self.warm_pending = False
             self.progress.hide()
             LOGGER.error("Thumbnail preparation failed: %s", event.get("message"))
+
+    # People ----------------------------------------------------------------
+
+    @property
+    def models_dir(self) -> Path:
+        return database_module.APP_DIR / "models"
+
+    def start_people(self) -> None:
+        """Find faces in photos not analysed yet, then regroup people. Off unless the setting is on."""
+        if not (self.settings.find_people and FACES_ENABLED and self.roots):
+            return
+        self.stop_people()
+        self.people_pending = True
+        if self.video_playing or self.scanning or self.warm_pending:
+            return  # resumes when playback stops or after the scan and warming
+        self.people_id += 1
+        people_id = self.people_id
+        stop = self.people_stop = threading.Event()
+        repository, folders, models, factory = self.repository, self.roots, self.models_dir, self.face_engine_factory
+        emit = self.people_events.received.emit
+
+        def make_engine():
+            if factory is OpenCVFaceEngine and not models_present(models):
+                emit({"type": "downloading", "id": people_id})
+                ensure_models(models)
+            return factory(models)
+
+        def run():
+            try:
+                result, groups = run_people_pass(
+                    repository, folders, make_engine, stop,
+                    lambda done, total: emit({"type": "progress", "id": people_id, "done": done, "total": total}),
+                    load_image=decode_for_faces)
+                emit({"type": "cancelled" if groups is None else "done", "id": people_id, "result": result,
+                      "groups": groups})
+            except ModelError as exc:
+                emit({"type": "error", "id": people_id, "message": str(exc)})
+            except Exception as exc:  # reported on the UI thread
+                LOGGER.exception("Finding people failed")
+                emit({"type": "error", "id": people_id, "message": str(exc)})
+
+        threading.Thread(target=run, daemon=True, name="people").start()
+
+    def stop_people(self) -> None:
+        self.people_stop.set()
+
+    def _handle_people_event(self, event: dict) -> None:
+        if event.get("id") != self.people_id or self.scanning:
+            return
+        kind = event["type"]
+        if kind == "downloading":
+            self.status.setText("Downloading the face models (about 38 MB, once)…")
+        elif kind == "progress":
+            done, total = event["done"], event["total"]
+            self.progress.setRange(0, max(1, total))
+            self.progress.setValue(done)
+            self.progress.show()
+            self.status.setText(f"Finding people  ·  {done:,} of {total:,} photos")
+        elif kind == "cancelled":
+            self.progress.hide()
+        elif kind == "done":
+            self.people_pending = False
+            self.progress.hide()
+            if event["result"].analyzed:
+                self.status.setText(self.ready_text + f"  ·  people updated from {event['result'].analyzed:,} photos")
+            self.reload_sidebar()
+            if self.scope_kind in ("person", "group"):
+                self.reload_library()
+        else:
+            self.people_pending = False
+            self.progress.hide()
+            self.status.setText(f"Couldn't find people: {event.get('message')}")
+            LOGGER.error("Finding people failed: %s", event.get("message"))
+
+    def rename_person(self, person_id: int) -> None:
+        current = self.sidebar.person_name(person_id)
+        name, accepted = QInputDialog.getText(self, "Name This Person", "Name:",
+                                              text="" if current == UNNAMED else current)
+        if accepted:
+            self._change_people(lambda repository: repository.rename_person(person_id, name))
+
+    def merge_people(self, keep: int, other: int) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Merge people?")
+        dialog.setText(f"Merge “{self.sidebar.person_name(other)}” into “{self.sidebar.person_name(keep)}”?")
+        dialog.setInformativeText("Their photos are combined under one person. Your photo files are not changed.")
+        merge = dialog.addButton("Merge", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is merge:
+            if self.scope_kind == "person" and self.scope_album == other:
+                self.sidebar.select_scope("person", None, keep, notify=False)
+                self.scope_album = keep
+            self._change_people(lambda repository: repository.merge_people(keep, other))
+
+    def set_person_hidden(self, person_id: int, hide: bool) -> None:
+        self._change_people(lambda repository: repository.set_person_hidden(person_id, hide))
+
+    def remove_from_person(self) -> None:
+        """"Not Ana": take the selected photos (or the one in the viewer) out of the person shown.
+
+        Only that person's face in each photo is affected; the faces remember they aren't this
+        person, so regrouping won't put them back, and they may still join whoever they really are.
+        """
+        if self.scope_kind != "person":
+            return
+        person, ids = self.scope_album, [item.id for item in self.target_items()]
+        if not ids:
+            self.status.setText("Select the photos that aren't this person")
+            return
+        name = self.sidebar.person_name(person)
+
+        def done(_result):
+            self.status.setText(f"Removed {len(ids):,} photo{'s' if len(ids) != 1 else ''} from {name}")
+            self.refresh_library()
+
+        repository = self.repository
+        run_async(self.io_pool, lambda: repository.detach_faces(person, ids), done,
+                  lambda error: LOGGER.error("Could not update people", exc_info=error))
+
+    # Faces in the viewer --------------------------------------------------
+
+    def _load_faces(self, item) -> None:
+        repository = self.repository
+        run_async(self.io_pool, lambda: repository.faces_in_photo(item.id),
+                  lambda faces: self.viewer.set_faces(item.id, faces),
+                  lambda error: LOGGER.error("Could not load faces", exc_info=error))
+
+    def _face_menu(self, face, position) -> None:
+        """What to do with one face: confirm it, say who it is instead, or that it isn't this person."""
+        name = face.name or UNNAMED
+        menu = QMenu(self)
+        if face.person_id is not None:
+            heading = menu.addAction(f"{name}" + ("  ✓" if face.confirmed else ""))
+            heading.setEnabled(False)
+            if not face.confirmed:
+                menu.addAction(f"Yes, This Is {name}",
+                               lambda: self._change_face(lambda repository: repository.assign_face(face.id, face.person_id)))
+            menu.addAction(f"Not {name}",
+                           lambda: self._change_face(lambda repository: repository.reject_face(face.id, face.person_id)))
+            menu.addSeparator()
+        others = [person for person in self.people_list if person.id != face.person_id]
+        if others:
+            choose = menu.addMenu("This Is…")
+            for person in sorted(others, key=lambda entry: (not entry.name, entry.name.casefold(), -entry.count)):
+                label = person.name or f"{UNNAMED} ({person.count:,} photos)"
+                choose.addAction(label, lambda person=person: self._change_face(
+                    lambda repository: repository.assign_face(face.id, person.id)))
+        menu.addAction("New Person…", lambda: self._name_face(face))
+        self._exec_menu(menu, position)
+
+    def _exec_menu(self, menu: QMenu, position) -> None:
+        """Show a context menu. Separate so tests can choose an action instead of a person."""
+        menu.exec(position)
+
+    def _name_face(self, face) -> None:
+        name, accepted = QInputDialog.getText(self, "New Person", "Name:")
+        if accepted and name.strip():
+            self._change_face(lambda repository: repository.new_person_for_face(face.id, name))
+
+    def _change_face(self, change) -> None:
+        """Apply a change to one face, then redraw the viewer's faces and refresh people."""
+        item = self.viewer.current_item
+        repository = self.repository
+
+        def done(_result):
+            if item is not None:
+                self._load_faces(item)
+            self.refresh_library()
+
+        run_async(self.io_pool, lambda: change(repository), done,
+                  lambda error: LOGGER.error("Could not update the face", exc_info=error))
+
+    # Review People ------------------------------------------------------------
+
+    @property
+    def review_active(self) -> bool:
+        return self.stack.currentWidget() is self.review
+
+    def show_review(self) -> None:
+        if not (self.settings.find_people and self.roots):
+            return
+        if self.viewer_active:
+            self.close_viewer()
+        self.close_insights()
+        if not self.review_active:
+            self.toolbar.hide()
+            self.sidebar.hide()
+            self.info_panel.hide()
+            self.stack.setCurrentWidget(self.review)
+        self.review.setFocus()
+        self.review.show_loading()
+        self.review_request_id += 1
+        request_id, repository, roots, hidden = self.review_request_id, self.repository, self.roots, self.hidden_albums
+
+        def done(suggestions):
+            if request_id == self.review_request_id and self.review_active:
+                covers = {person.id: (person.cover, person.box) for person in self.people_list}
+                self.review.set_suggestions(suggestions, covers)
+
+        run_async(self.io_pool, lambda: repository.face_suggestions(roots, hidden), done,
+                  lambda error: LOGGER.error("Could not load face suggestions", exc_info=error))
+
+    def close_review(self) -> None:
+        if not self.review_active:
+            return
+        self.stack.setCurrentWidget(self.grid_page)
+        self.toolbar.show()
+        self.sidebar.setVisible(self.settings.sidebar_visible)
+        self.info_panel.setVisible(self.settings.info_panel_visible)
+        self.view.setFocus()
+        if self.review.answers:
+            self.refresh_library()  # people's photos and counts changed
+
+    def _review_answered(self, yes: bool, suggestion) -> None:
+        face, person = suggestion.face_id, suggestion.person_id
+        if yes:
+            self._change_people(lambda repository: repository.assign_face(face, person), refresh=False)
+        else:
+            self._change_people(lambda repository: repository.reject_face(face, person), refresh=False)
+
+    def set_least_typical(self, on: bool) -> None:
+        """Show the person's photos with the least typical face first, as one list in All Photos."""
+        on = on and self.scope_kind == "person"
+        self.least_typical = on
+        self.least_typical_action.setChecked(on)
+        if on and self.model.mode != "all":
+            self.set_view_mode("all")
+        self.reload_library(keep_position=False)
+
+    def check_person(self, person_id: int) -> None:
+        self.sidebar.select_scope("person", None, person_id)
+        self.set_least_typical(True)
+
+    # Groups of people ------------------------------------------------------
+
+    def _open_group_dialog(self, title: str, name: str = "", members=()) -> tuple[str, list[int]] | None:
+        """Ask for a group's name and people. Separate so tests can answer it."""
+        dialog = GroupDialog(self.people_list, name, members, title, self)
+        return (dialog.selected_name, dialog.selected_members) if dialog.exec() else None
+
+    def new_group(self, members) -> None:
+        if not self.settings.find_people:
+            return
+        answer = self._open_group_dialog("New Group", members=members)
+        if answer is None:
+            return
+        name, chosen = answer
+        repository = self.repository
+
+        def done(group_id):
+            self.select_group_after_reload = group_id
+            self.refresh_library()
+
+        run_async(self.io_pool, lambda: repository.create_group(name, chosen), done,
+                  lambda error: LOGGER.error("Could not create the group", exc_info=error))
+
+    def edit_group(self, group_id: int) -> None:
+        group = next((entry for entry in self.groups_list if entry.id == group_id), None)
+        if group is None:
+            return
+        answer = self._open_group_dialog("Edit Group", group.name, group.members)
+        if answer is not None:
+            name, chosen = answer
+            # Members with no photo shown right now (say, only in a hidden album) aren't in the dialog;
+            # they stay in the group rather than being dropped unseen.
+            offered = {person.id for person in self.people_list}
+            chosen = list(chosen) + [member for member in group.members if member not in offered]
+            self._change_people(lambda repository: repository.update_group(group_id, name, chosen))
+
+    def rename_group(self, group_id: int) -> None:
+        name, accepted = QInputDialog.getText(self, "Rename Group", "Name:", text=self.sidebar.group_name(group_id))
+        if accepted and name.strip():
+            self._change_people(lambda repository: repository.update_group(group_id, name=name))
+
+    def delete_group(self, group_id: int) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Delete group?")
+        dialog.setText(f"Delete the group “{self.sidebar.group_name(group_id)}”?")
+        dialog.setInformativeText("Only the group goes. Its people and their photos stay as they are.")
+        delete = dialog.addButton("Delete Group", QMessageBox.ButtonRole.DestructiveRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is delete:
+            self._change_people(lambda repository: repository.delete_group(group_id))
+
+    def _change_people(self, change, refresh: bool = True) -> None:
+        repository = self.repository
+        run_async(self.io_pool, lambda: change(repository), lambda _result: self.refresh_library() if refresh else None,
+                  lambda error: LOGGER.error("Could not update people", exc_info=error))
 
     # Library Insights ------------------------------------------------------
 
@@ -1233,6 +1642,7 @@ class MainWindow(QMainWindow):
     def show_insights(self) -> None:
         if self.viewer_active:
             self.close_viewer()
+        self.close_review()
         if not self.insights_active:
             self.toolbar.hide()
             self.sidebar.hide()
@@ -1292,6 +1702,8 @@ class MainWindow(QMainWindow):
         if self.viewer_active:
             item = self.viewer.current_item
             return [item] if item else []
+        if self.full_page_active:
+            return []  # Insights or Review: the grid's selection isn't on screen
         return self.selected_items()
 
     def _with_target(self, callback) -> None:
@@ -1325,7 +1737,7 @@ class MainWindow(QMainWindow):
     def toggle_info(self) -> None:
         visible = not self.settings.info_panel_visible
         self.settings.info_panel_visible = visible
-        self.info_panel.setVisible(visible and not self.insights_active)
+        self.info_panel.setVisible(visible and not (self.insights_active or self.review_active))
         for control in (self.info_action, self.info_button, self.viewer_info_button):
             control.setChecked(visible)
         self.settings_timer.start()
@@ -1352,9 +1764,14 @@ class MainWindow(QMainWindow):
         menu.addAction(REVEAL_LABEL, lambda: self.reveal_item(items[0])).setEnabled(single)
         menu.addAction("Open in Default App", lambda: self.open_in_default_app(items[0])).setEnabled(single)
         menu.addSeparator()
+        if self.scope_kind == "person":
+            name = self.sidebar.person_name(self.scope_album)
+            menu.addAction(f"Not {name} – Remove from {name}" if single
+                           else f"Not {name} – Remove {len(items):,} Photos from {name}", self.remove_from_person)
+            menu.addSeparator()
         label = "Move to Trash…" if single else f"Move {len(items):,} Items to Trash…"
         menu.addAction(label, self.move_to_trash)
-        menu.exec(self.view.viewport().mapToGlobal(position))
+        self._exec_menu(menu, self.view.viewport().mapToGlobal(position))
 
     def move_to_trash(self) -> None:
         items = self.target_items()
@@ -1418,8 +1835,11 @@ class MainWindow(QMainWindow):
             self.loader.forget(removed)
             count = len(removed)
             self.status.setText(f"Moved {count:,} item{'s' if count != 1 else ''} to the Trash")
-            self._remove_from_grid(removed, first_row)
-            self.reload_sidebar()
+            if result.unpaired:
+                self.refresh_library()  # a Live Photo's clip stayed behind and is now a video of its own
+            else:
+                self._remove_from_grid(removed, first_row)
+                self.reload_sidebar()
         if result.failed:
             names = "\n".join(f"• {item.name}: {reason}" for item, reason in result.failed[:8])
             more = f"\n…and {len(result.failed) - 8:,} more" if len(result.failed) > 8 else ""
@@ -1434,9 +1854,15 @@ class MainWindow(QMainWindow):
         snapshot = self.snapshot
         if snapshot is None:
             return
+        if self.applied_request_id != self.query_request_id:
+            # A newer query (another scope or search) is on its way; trimming the old snapshot would
+            # cancel it. The index no longer has the trashed rows, so query again instead.
+            self.reload_library()
+            return
         self.query_request_id += 1
         request_id = self.query_request_id
         anchor = self._anchor_item(exclude=removed)
+        single_section = self.single_section
         remaining_source = snapshot.items
 
         def rebuilt(new_snapshot):
@@ -1451,7 +1877,7 @@ class MainWindow(QMainWindow):
                 self.view.scrollTo(index)
 
         run_async(self.query_pool,
-                  lambda: build_snapshot([item for item in remaining_source if item.id not in removed]),
+                  lambda: build_snapshot([item for item in remaining_source if item.id not in removed], single_section),
                   rebuilt)
 
     # Settings ------------------------------------------------------------
@@ -1468,8 +1894,22 @@ class MainWindow(QMainWindow):
                   lambda error: LOGGER.error("Could not save settings", exc_info=error))
 
     def show_preferences(self) -> None:
-        dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self)
+        dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self,
+                                   find_people=self.settings.find_people, faces_available=FACES_ENABLED)
         if dialog.exec():
+            if dialog.selected_find_people != self.settings.find_people:
+                self.settings.find_people = dialog.selected_find_people
+                self.review_action.setEnabled(self.settings.find_people)
+                self.new_group_action.setEnabled(self.settings.find_people)
+                self.viewer.set_faces_available(self.settings.find_people)
+                if self.settings.find_people:
+                    self.start_people()
+                else:
+                    self.stop_people()
+                    self.people_pending = False
+                    if self.scope_kind in ("person", "group"):
+                        self.sidebar.select_scope("all", None, None)
+                self.reload_sidebar()
             self.settings.theme = dialog.selected_theme
             self.settings.time_format = dialog.selected_time_format
             if dialog.selected_watch_folder != self.settings.watch_folder:
@@ -1487,9 +1927,10 @@ class MainWindow(QMainWindow):
         self.stop_watching()
         self.stop_event.set()
         self.stop_warming()
+        self.stop_people()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self._save_settings()
-        self.query_pool.clear()
+        cancel_queued(self.query_pool)
         self.io_pool.waitForDone(2000)
         self.viewer.shutdown()
         self.loader.shutdown()

@@ -3,7 +3,7 @@ import shutil
 import threading
 from datetime import datetime
 
-from photolibrary.core import media
+from photolibrary.core import database, media
 from photolibrary.core.database import MediaRepository
 from photolibrary.core.indexer import MediaIndexer
 from photolibrary.core.trash import trash_items
@@ -71,3 +71,26 @@ class TrashTests(TempAppTestCase):
         self.assertEqual(calls, [])
         self.assertEqual(result.trashed_ids, {self.items["c.jpg"].id})
         self.assertEqual(len(self.repo.query(self.library)), 2)
+
+    def test_a_live_photo_video_left_behind_shows_as_a_video(self):
+        clip = self.library / "a.mov"
+        clip.write_bytes(b"not really a video")
+        MediaIndexer(self.library, threading.Event(), 2, lambda event: None).run()
+        connection = database.open_database()
+        try:
+            video_id = connection.execute("SELECT id FROM media WHERE file_name = 'a.mov'").fetchone()[0]
+            photo_id = self.items["a.jpg"].id
+            connection.executemany("UPDATE media SET live_pair_id = ? WHERE id = ?",
+                                   [(photo_id, video_id), (video_id, photo_id)])
+            connection.commit()
+        finally:
+            connection.close()
+        photo = next(item for item in self.repo.query(self.library) if item.name == "a.jpg")
+        self.assertTrue(photo.is_live)
+
+        def refuse_videos(path):
+            return path.suffix != ".mov" and self.fake_trash(path)
+
+        result = trash_items(self.library, [photo], refuse_videos)
+        self.assertEqual(result.unpaired, [video_id])
+        self.assertIn("a.mov", [item.name for item in self.repo.query(self.library)])

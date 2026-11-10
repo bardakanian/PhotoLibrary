@@ -1,11 +1,15 @@
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QVBoxLayout,
+)
 
 from .time_format import system_uses_12_hour
 
 
 class PreferencesDialog(QDialog):
     def __init__(self, current_theme: str, current_time_format: str = "system", watch_folder: bool = True,
-                 parent=None):
+                 parent=None, *, find_people: bool = False, faces_available: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -40,6 +44,17 @@ class PreferencesDialog(QDialog):
         self.watch_folder.setChecked(watch_folder)
         self.watch_folder.setToolTip("When off, use Rescan (⌘R) after adding, moving or deleting files.")
         layout.addWidget(self.watch_folder)
+        self.find_people = QCheckBox("Find people in photos")
+        self.find_people.setChecked(find_people and faces_available)
+        self.find_people.setEnabled(faces_available)
+        layout.addWidget(self.find_people)
+        people_note = QLabel(
+            "Faces are found and grouped on this Mac; no photo or face ever leaves it. The first time, "
+            "two small open models (about 38 MB) are downloaded from the OpenCV model zoo."
+            if faces_available else "Needs OpenCV: run pip install opencv-python-headless, then reopen the app.")
+        people_note.setProperty("muted", True)
+        people_note.setWordWrap(True)
+        layout.addWidget(people_note)
         note = QLabel("System follows your macOS appearance and clock settings.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
@@ -54,9 +69,69 @@ class PreferencesDialog(QDialog):
         return self.theme.currentData()
 
     @property
+    def selected_find_people(self) -> bool:
+        return self.find_people.isChecked()
+
+    @property
     def selected_watch_folder(self) -> bool:
         return self.watch_folder.isChecked()
 
     @property
     def selected_time_format(self) -> str:
         return self.time_format.currentData()
+
+
+class GroupDialog(QDialog):
+    """Name a group and tick its people. A group shows the photos where all of them appear together."""
+
+    def __init__(self, people, name: str = "", selected=(), title: str = "New Group", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumSize(360, 460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        self.name = QLineEdit(name)
+        self.name.setPlaceholderText("Family, Friends, …")
+        self.name.setAccessibleName("Group name")
+        form = QFormLayout()
+        form.addRow("Name", self.name)
+        layout.addLayout(form)
+        note = QLabel("Shows the photos in which everyone ticked appears together.")
+        note.setProperty("muted", True)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.list = QListWidget()
+        self.list.setAccessibleName("People in the group")
+        self.list.setSpacing(3)
+        chosen = set(selected)
+        for person in sorted(people, key=lambda entry: (not entry.name, entry.name.casefold(), -entry.count)):
+            label = person.name or f"Unnamed person ({person.count:,} photos)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, person.id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if person.id in chosen else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.name.textChanged.connect(self._update_save)
+        self.list.itemChanged.connect(self._update_save)
+        self._update_save()
+
+    @property
+    def selected_name(self) -> str:
+        return self.name.text().strip()
+
+    @property
+    def selected_members(self) -> list[int]:
+        return [self.list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.list.count())
+                if self.list.item(row).checkState() == Qt.CheckState.Checked]
+
+    def _update_save(self, *_args) -> None:
+        # A group needs a name and at least two people (one person already has their own list).
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(
+            bool(self.selected_name) and len(self.selected_members) >= 2)

@@ -207,6 +207,8 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(format_duration(None), "")
         self.assertEqual(format_size(512), "512 bytes")
         self.assertEqual(format_size(2_500_000), "2.5 MB")
+        self.assertEqual(format_size(999_999), "1.0 MB")
+        self.assertEqual(format_size(3_200_000_000_000), "3.2 TB")
         self.assertEqual(format_dimensions(4032, 3024), "4,032 × 3,024  ·  12.2 MP")
         self.assertEqual(format_date(datetime(2024, 5, 3, 9, 7)), "Friday, May 3, 2024 at 09:07")
         self.assertEqual(format_date(None), "Unknown date")

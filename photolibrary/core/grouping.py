@@ -105,7 +105,8 @@ class LibrarySnapshot:
     years: list[Summary]
 
 
-def build_snapshot(items: list[MediaItem]) -> LibrarySnapshot:
+def build_snapshot(items: list[MediaItem], single_section: str | None = None) -> LibrarySnapshot:
+    """`single_section` puts every item under one heading in the given order (not grouped by month)."""
     months = summarize(items, "month")
-    return LibrarySnapshot(items, group_by_month(items), months, group_summaries_by_year(months),
-                           summarize(items, "year"))
+    sections = [Section("all", single_section, 0, len(items))] if single_section and items else group_by_month(items)
+    return LibrarySnapshot(items, sections, months, group_summaries_by_year(months), summarize(items, "year"))

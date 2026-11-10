@@ -7,19 +7,29 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QStandard
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QMenu, QStyle, QStyledItemDelegate, QTreeView, QVBoxLayout
 
 from ...core.library_roots import display_names
-from ...core.models import Album
+from ...core.models import Album, PeopleGroup, Person
 from ...core.settings import SIDEBAR_SECTIONS
 from ..theme.typography import Typography
 from ..thumbnails import ThumbnailLoader
+from .face_view import FACE_BUCKET, face_source_rect
 
-ScopeRole = Qt.ItemDataRole.UserRole + 1   # ("kind", "all" | "photos" | "videos"), ("folder", root) or ("album", root, name)
+ScopeRole = Qt.ItemDataRole.UserRole + 1   # ("kind", …), ("folder", root), ("album", root, name) or ("person", id)
 CountRole = Qt.ItemDataRole.UserRole + 2
 CoverRole = Qt.ItemDataRole.UserRole + 3   # MediaItem used as the album thumbnail
 HeaderRole = Qt.ItemDataRole.UserRole + 4   # the section's key: "library", "folders", "albums" or "hidden"
 CollapsedRole = Qt.ItemDataRole.UserRole + 5
+FaceBoxRole = Qt.ItemDataRole.UserRole + 6   # a person's cover face (x, y, w, h) as fractions of the photo
+ReviewRole = Qt.ItemDataRole.UserRole + 7  # the "Review Suggestions" row: opens the Review page
+MoreRole = Qt.ItemDataRole.UserRole + 8    # the "Show N More…" / "Show Fewer" row at the end of People
+# Unnamed people in fewer photos than this are folded away until "Show N More…" is clicked:
+# mostly passers-by, and a real library has a hundred or more of them.
+FEW_PHOTOS = 10
+UNNAMED = "Unnamed person"
 
 LIBRARY_ENTRIES = (("all", "All Photos"), ("photos", "Photos"), ("videos", "Videos"))
 ICON_SIZE = 22
+FACE_SIZE = 34      # people's face pictures: a face needs more room than a glyph to be recognised
+FACE_ROW_HEIGHT = 42
 
 
 class SidebarDelegate(QStyledItemDelegate):
@@ -34,7 +44,9 @@ class SidebarDelegate(QStyledItemDelegate):
         self.count_font.setPixelSize(Typography.CAPTION)
 
     def sizeHint(self, option, index) -> QSize:
-        return QSize(option.rect.width(), 28 if index.data(HeaderRole) else 32)
+        if index.data(HeaderRole):
+            return QSize(option.rect.width(), 28)
+        return QSize(option.rect.width(), FACE_ROW_HEIGHT if index.data(FaceBoxRole) else 32)
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         colors = self.theme.colors
@@ -61,11 +73,20 @@ class SidebarDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(colors.border))
             painter.drawRoundedRect(background, 6, 6)
 
-        icon = QRectF(rect.left() + 14, rect.center().y() - ICON_SIZE / 2 + 1, ICON_SIZE, ICON_SIZE)
+        size = FACE_SIZE if index.data(FaceBoxRole) else ICON_SIZE
+        icon = QRectF(rect.left() + (12 if size > ICON_SIZE else 14), rect.center().y() - size / 2 + 1, size, size)
         scope = index.data(ScopeRole)
         cover = index.data(CoverRole)
-        if cover is not None:
-            self._paint_cover(painter, icon, cover)
+        if index.data(MoreRole):
+            painter.setPen(QColor(colors.accent))
+            painter.drawText(rect.adjusted(int(icon.left()) - rect.left(), 0, -14, 0),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, index.data(Qt.ItemDataRole.DisplayRole))
+            painter.restore()
+            return
+        if index.data(ReviewRole):
+            self._paint_question(painter, icon)
+        elif cover is not None:
+            self._paint_cover(painter, icon, cover, index.data(FaceBoxRole))
         else:
             self._paint_glyph(painter, icon, scope)
 
@@ -85,6 +106,14 @@ class SidebarDelegate(QStyledItemDelegate):
         painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
         painter.restore()
 
+    def _paint_question(self, painter: QPainter, rect: QRectF) -> None:
+        pen = QPen(QColor(self.theme.colors.accent), 1.6)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(rect.adjusted(3, 3, -3, -3))
+        painter.setFont(self.header_font)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
+
     def _paint_chevron(self, painter: QPainter, rect, collapsed: bool) -> None:
         """A small › (collapsed) or ⌄ (open) at the right of a section header, as in Finder."""
         pen = QPen(QColor(self.theme.colors.text_subtle), 1.5)
@@ -98,17 +127,25 @@ class SidebarDelegate(QStyledItemDelegate):
             points = [QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2)]
         painter.drawPolyline(points)
 
-    def _paint_cover(self, painter: QPainter, rect: QRectF, cover) -> None:
+    def _paint_cover(self, painter: QPainter, rect: QRectF, cover, face=None) -> None:
+        """An album's newest photo, or for a person their face, cut from the grid thumbnail and round."""
         path = QPainterPath()
-        path.addRoundedRect(rect, 5, 5)
-        pixmap = self.loader.pixmap(cover, 96)
-        if not self.loader.has_exact(cover, 96):
-            self.loader.request(cover, 96)
+        if face:
+            path.addEllipse(rect)
+        else:
+            path.addRoundedRect(rect, 5, 5)
+        # A face is a small part of the photo, so it is cut from the largest grid thumbnail.
+        bucket = FACE_BUCKET if face else 96
+        pixmap = self.loader.pixmap(cover, bucket)
+        if not self.loader.has_exact(cover, bucket):
+            self.loader.request(cover, bucket)
         painter.save()
         painter.setClipPath(path)
         if pixmap is not None:
             side = min(pixmap.width(), pixmap.height())
             source = QRectF((pixmap.width() - side) / 2, (pixmap.height() - side) / 2, side, side)
+            if face:
+                source = face_source_rect(pixmap.width(), pixmap.height(), face)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.drawPixmap(rect, pixmap, source)
         else:
@@ -125,7 +162,15 @@ class SidebarDelegate(QStyledItemDelegate):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         inner = rect.adjusted(3, 4, -3, -4)
         kind = scope[1] if scope and scope[0] == "kind" else (scope[0] if scope else "all")
-        if kind == "folder":
+        if kind == "group":
+            # Two heads and shoulders, one behind the other.
+            for dx, scale in ((3.0, 0.8), (-2.0, 1.0)):
+                centre_x = inner.center().x() + dx
+                head = 3.2 * scale
+                painter.drawEllipse(QPointF(centre_x, inner.top() + head + 0.5), head, head)
+                painter.drawArc(QRectF(centre_x - 5.5 * scale, inner.top() + 2 * head + 2, 11 * scale, 9 * scale),
+                                0, 180 * 16)
+        elif kind == "folder":
             # A folder outline with a tab.
             tab = QRectF(inner.left(), inner.top(), inner.width() * 0.42, 3)
             painter.drawPolyline([QPointF(inner.left(), inner.bottom()), QPointF(inner.left(), tab.top()),
@@ -160,7 +205,17 @@ class Sidebar(QFrame):
     The Folders section appears only when the library has more than one folder.
     """
 
-    scope_changed = Signal(str, object, object)
+    scope_changed = Signal(str, object, object)  # ("person", None, person id) for a person
+    rename_person_requested = Signal(int)
+    merge_people_requested = Signal(int, int)       # keep, other
+    hide_person_requested = Signal(int, bool)
+    review_requested = Signal()
+    check_person_requested = Signal(int)   # show their photos least typical face first
+    new_group_requested = Signal(object)   # person ids to start with
+    edit_group_requested = Signal(int)
+    rename_group_requested = Signal(int)
+    delete_group_requested = Signal(int)
+    add_to_group_requested = Signal(int, int)  # group, person
     collapsed_changed = Signal(object)  # sorted list of collapsed section keys
     remove_folder_requested = Signal(str)
     hide_album_requested = Signal(str, str, bool)  # root, album, hide (False: show again)
@@ -190,9 +245,17 @@ class Sidebar(QFrame):
 
         self.model = QStandardItemModel(self)
         self.collapsed: set[str] = set()  # section keys the user folded away
+        self.show_all_people = False      # list unnamed people in only a few photos too
+        self._people: list[Person] = []
+        self._suggestions = 0
         self.library_header = self._header("Library", "library")
         self.folders_header = self._header("Folders", "folders")
+        self.people_header = self._header("People", "people")
+        self.unnamed_header = self._header("Unnamed People", "unnamed")
+        self.groups_header = self._header("Groups", "groups")
+        self._groups: list[PeopleGroup] = []
         self.albums_header = self._header("Albums", "albums")
+        self.hidden_people_header = self._header("Hidden People", "hidden_people")
         # Listed only while some album is hidden; its albums still open when clicked.
         self.hidden_header = self._header("Hidden Albums", "hidden")
         self.model.appendRow(self.library_header)
@@ -224,7 +287,8 @@ class Sidebar(QFrame):
         return item
 
     def _headers(self) -> list[QStandardItem]:
-        return [self.library_header, self.folders_header, self.albums_header, self.hidden_header]
+        return [self.library_header, self.folders_header, self.people_header, self.unnamed_header, self.groups_header,
+                self.albums_header, self.hidden_header, self.hidden_people_header]
 
     def set_collapsed(self, keys) -> None:
         """Fold these sections (for example as saved from the last session)."""
@@ -254,6 +318,11 @@ class Sidebar(QFrame):
         key = index.data(HeaderRole)
         if key:
             self.toggle_section(key)
+        elif index.data(ReviewRole):
+            self.review_requested.emit()
+        elif index.data(MoreRole):
+            self.show_all_people = not self.show_all_people
+            self.set_people(self._people, self._suggestions)
 
     @staticmethod
     def _entry(text: str, scope: tuple) -> QStandardItem:
@@ -331,10 +400,112 @@ class Sidebar(QFrame):
             self._apply_collapsed()
         finally:
             self._quiet = False
-        if album is not None and (root, album) not in {(entry.root, entry.name) for entry in albums}:
+        if kind not in ("person", "group") and album is not None \
+                and (root, album) not in {(entry.root, entry.name) for entry in albums}:
             self.select_scope("all", None, None)  # the album went away (renamed or emptied)
         else:
             self.select_scope(kind, root, album, notify=False)
+
+    def set_people(self, people: list[Person], suggestions: int = 0) -> None:
+        """List the people found in photos: named ones under People, the rest under Unnamed People.
+
+        Each section only shows when it has someone. People starts with a "Review Suggestions" row
+        when there are `suggestions`. Unnamed people in only a few photos sit behind "Show N More…".
+        """
+        kind, root, current = self._scope
+        self._people, self._suggestions = list(people), suggestions
+        visible = [person for person in people if not person.hidden]
+        named = [person for person in visible if person.name]
+        unnamed = [person for person in visible if not person.name]
+        few = [person for person in unnamed if person.count < FEW_PHOTOS
+               and not (kind == "person" and person.id == current)]
+        self._quiet = True
+        try:
+            sections = (
+                (self.people_header, named, [self.unnamed_header, self.groups_header, self.albums_header]),
+                (self.unnamed_header, unnamed if self.show_all_people else [p for p in unnamed if p not in few],
+                 [self.groups_header, self.albums_header]),
+                (self.hidden_people_header, [person for person in people if person.hidden], []),
+            )
+            for header, entries, after_me in sections:
+                header.removeRows(0, header.rowCount())
+                if header is self.people_header and visible and suggestions:
+                    review = QStandardItem("Review Suggestions")
+                    review.setData(True, ReviewRole)
+                    review.setData(suggestions, CountRole)
+                    review.setToolTip("Faces that look like someone: confirm or reject them")
+                    review.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                    header.appendRow(review)
+                for person in entries:
+                    item = self._entry(person.name or UNNAMED, ("person", person.id))
+                    item.setData(person.count, CountRole)
+                    item.setData(person.cover, CoverRole)
+                    item.setData(person.box, FaceBoxRole)
+                    header.appendRow(item)
+                if header is self.unnamed_header and few:
+                    more = QStandardItem("Show Fewer" if self.show_all_people else f"Show {len(few):,} More…")
+                    more.setData(True, MoreRole)
+                    more.setToolTip(f"Unnamed people in fewer than {FEW_PHOTOS} photos")
+                    more.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                    header.appendRow(more)
+                self._place(header, header.rowCount() > 0, after_me)
+            self._apply_collapsed()
+        finally:
+            self._quiet = False
+        if kind == "person" and current not in {person.id for person in people}:
+            self.select_scope("all", None, None)  # merged away, or no photos left
+        else:
+            self.select_scope(kind, root, current, notify=False)
+
+    def _place(self, header: QStandardItem, wanted: bool, before: list[QStandardItem]) -> None:
+        """Show or remove a section, keeping the order: it goes before the first listed of `before`."""
+        listed = header.model() is not None
+        if wanted and not listed:
+            following = next((section for section in before if section.model() is not None), None)
+            if following is not None:
+                self.model.insertRow(following.row(), header)
+            else:
+                self.model.appendRow(header)
+        elif not wanted and listed:
+            self.model.takeRow(header.row())
+
+    def set_groups(self, groups: list[PeopleGroup]) -> None:
+        """List the groups of people, after People (only while there is a group)."""
+        kind, root, current = self._scope
+        self._groups = list(groups)
+        self._quiet = True
+        try:
+            header = self.groups_header
+            header.removeRows(0, header.rowCount())
+            for group in groups:
+                item = self._entry(group.name, ("group", group.id))
+                item.setData(group.count, CountRole)
+                item.setData(group.cover, CoverRole)
+                header.appendRow(item)
+            listed = header.model() is not None
+            if groups and not listed:
+                self.model.insertRow(self.albums_header.row(), header)
+            elif not groups and listed:
+                self.model.takeRow(header.row())
+            self._apply_collapsed()
+        finally:
+            self._quiet = False
+        if kind == "group" and current not in {group.id for group in groups}:
+            self.select_scope("all", None, None)  # the group was deleted
+        else:
+            self.select_scope(kind, root, current, notify=False)
+
+    def group_name(self, group_id: int) -> str:
+        return next((group.name for group in self._groups if group.id == group_id), "Group")
+
+    def _person_items(self) -> list[QStandardItem]:
+        """People rows (not the Review Suggestions row)."""
+        return [header.child(row) for header in (self.people_header, self.unnamed_header, self.hidden_people_header)
+                for row in range(header.rowCount()) if header.child(row).data(ScopeRole)]
+
+    def person_name(self, person_id: int) -> str:
+        item = next((item for item in self._person_items() if item.data(ScopeRole) == ("person", person_id)), None)
+        return item.text() if item is not None else UNNAMED
 
     def select_album(self, name: str, root: str | None = None) -> None:
         """Select an album by name (the first one with that name, unless `root` says which)."""
@@ -369,6 +540,11 @@ class Sidebar(QFrame):
         self.set_counts({})
 
     def _find(self, kind: str, root: str | None, album: str | None) -> QStandardItem | None:
+        if kind == "person":
+            return next((item for item in self._person_items() if item.data(ScopeRole) == ("person", album)), None)
+        if kind == "group":
+            return next((self.groups_header.child(row) for row in range(self.groups_header.rowCount())
+                         if self.groups_header.child(row).data(ScopeRole) == ("group", album)), None)
         if root is None:
             return self._library_items.get(kind) if album is None else None
         if album is None:
@@ -384,6 +560,8 @@ class Sidebar(QFrame):
             return
         if scope[0] == "kind":
             self._set_scope(scope[1], None, None)
+        elif scope[0] in ("person", "group"):
+            self._set_scope(scope[0], None, scope[1])
         elif scope[0] == "folder":
             self._set_scope("all", scope[1], None)
         else:
@@ -405,6 +583,35 @@ class Sidebar(QFrame):
             hidden = self.is_hidden(scope[1], scope[2])
             menu.addAction("Show Album in All Photos" if hidden else "Hide Album",
                            lambda: self.hide_album_requested.emit(scope[1], scope[2], not hidden))
+            menu.addSeparator()
+        elif scope and scope[0] == "person":
+            person = scope[1]
+            menu.addAction("Name…", lambda: self.rename_person_requested.emit(person))
+            menu.addAction("Check Faces (Least Typical First)", lambda: self.check_person_requested.emit(person))
+            others = [item for item in self._person_items() if item.data(ScopeRole) != scope]
+            if others:
+                merge = menu.addMenu("Merge Into")
+                for other in others:
+                    target = other.data(ScopeRole)[1]
+                    merge.addAction(other.text(), lambda target=target: self.merge_people_requested.emit(target, person))
+            hidden = self.hidden_people_header.model() is not None and any(
+                item.data(ScopeRole) == scope for item in
+                (self.hidden_people_header.child(row) for row in range(self.hidden_people_header.rowCount())))
+            menu.addAction("Show Person" if hidden else "Hide Person",
+                           lambda: self.hide_person_requested.emit(person, not hidden))
+            groups = menu.addMenu("Add to Group")
+            for group in self._groups:
+                if person not in group.members:
+                    groups.addAction(group.name, lambda group=group.id: self.add_to_group_requested.emit(group, person))
+            if self._groups:
+                groups.addSeparator()
+            groups.addAction("New Group…", lambda: self.new_group_requested.emit([person]))
+            menu.addSeparator()
+        elif scope and scope[0] == "group":
+            group = scope[1]
+            menu.addAction("Rename…", lambda: self.rename_group_requested.emit(group))
+            menu.addAction("Edit Members…", lambda: self.edit_group_requested.emit(group))
+            menu.addAction("Delete Group…", lambda: self.delete_group_requested.emit(group))
             menu.addSeparator()
         menu.addAction("Add Folder to Library…", self.add_folder_requested.emit)
         menu.exec(self.tree.viewport().mapToGlobal(position))

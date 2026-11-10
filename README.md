@@ -34,9 +34,41 @@ incremental indexer) come from the On This Day app.
   is more than one), plus each top-level subfolder as an **album** with its newest photo as
   a thumbnail. An album includes everything in its nested folders. When two folders have an
   album with the same name, each is labelled with its folder, as in "Trips — Backup Drive".
-  Click a section heading (Library, Folders, Albums, Hidden Albums) to fold it away or open it
+  Click a section heading (Library, Folders, People, Unnamed People, Groups, Albums and the hidden lists) to fold it away or open it
   again; the app remembers which are folded. Hide the whole sidebar with the sidebar button at
   the left of the toolbar, or ⌥⌘S.
+- **People** (optional, off until you turn it on in Settings): the app finds the faces in
+  your photos, groups the same person together and lists everyone in a **People** section of
+  the sidebar, with a round face picture and a photo count. Named people are listed under
+  **People** and everyone else under **Unnamed People**, which you can fold away. Click a person to see their photos
+  in the normal grid (Years, Months, search and the viewer all work there). Right-click a
+  person to **Name…** them, **Merge Into** another person, or **Hide Person**. To take wrongly
+  matched photos out of a person, select them and right-click ▸ **Not Ana – Remove from Ana**
+  (or press ⌥⌫, which also works on the photo open in the viewer).
+  - **Review Suggestions** (top of the People section, or ⇧⌘P) asks about faces that look like
+    someone but weren't grouped with them: "Is this Ana?" Answer with Y, N, or → to skip. Your
+    answers are kept, even when people are regrouped.
+  - **Groups:** right-click a person ▸ **Add to Group** ▸ **New Group…** (or View ▸ New
+    Group…), name it and tick its people. The group, under **Groups** in the sidebar, shows the
+    photos in which everyone in it appears together. Right-click a group to rename it, edit its
+    members or delete it; deleting a group never touches its people or photos.
+  - **Check Faces:** right-click a person ▸ **Check Faces (Least Typical First)** (or View ▸
+    Least Typical Faces First) to list their photos with the least typical face first. Wrong
+    matches gather at the top, so a quick look there is enough to check a person.
+  - **Faces in the viewer:** press F (or the Faces button) to outline every face with its
+    name. Click a face to confirm it, say it isn't that person, choose who it is, or start a
+    new person, which fixes one face in a group photo without touching the others.
+  - **Private:** faces are found and grouped on your computer. No photo or face leaves it.
+  - **Names are kept:** they survive moving or renaming photos and folders, re-analysis, and even
+    a lost database: names, hidden people and each person's reference face are also backed up to
+    `~/.photo_library/people.json` (private: it holds face fingerprints, not photos).
+  - **How:** two open models from the [OpenCV model zoo](https://github.com/opencv/opencv_zoo),
+    YuNet (finds faces, MIT licence) and SFace (face fingerprints, Apache 2.0), downloaded
+    once (about 38 MB) and checked against fixed checksums. Fingerprints are grouped with
+    DBSCAN. Names, merges and removals are kept when new photos are added.
+  - **Cost:** the first pass reads every photo once in the background, after thumbnails are
+    ready, and pauses while a video plays or a scan runs. Later passes look only at new or
+    edited photos. Videos aren't analysed.
 - **Hide an album:** right-click it in the sidebar and choose **Hide Album**. Its photos
   disappear from All Photos, Photos, Videos, Years, Months, search, the counts and Insights,
   and it moves to a **Hidden Albums** section. You can still open it from there. Right-click ▸
@@ -151,9 +183,10 @@ QT_LOGGING_RULES="qt.multimedia.*=true" python app.py
   - pillow-heif (HEIC/HEIF)
   - imageio-ffmpeg (video dates, thumbnails and metadata)
   - watchdog (folder watching)
+  - opencv-python-headless (People: finding and recognising faces; brings numpy)
 
-The app still runs without pillow-heif, imageio-ffmpeg or watchdog; HEIC files, video
-previews or automatic updates are then limited.
+The app still runs without pillow-heif, imageio-ffmpeg, watchdog or OpenCV; HEIC files, video
+previews, automatic updates or People are then limited or unavailable.
 
 ## Run it
 
@@ -228,6 +261,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Show or hide the sidebar | ⌥⌘S |
 | Show or hide info | ⌘I |
 | Library Insights | ⌘⇧I (Esc returns) |
+| Review People | ⌘⇧P, then Y / N / → (Esc returns) |
 | **Selecting** | |
 | Move between items | Arrow keys, Page Up/Down, Home/End |
 | Add to the selection / select a range | ⌘-click / ⇧-click (or ⇧-arrows) |
@@ -244,6 +278,8 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Zoom photo / actual size | ⌘= / ⌘−, ⌘0 (or double-click, pinch, ⌘-scroll) |
 | Play / pause, skip 5 s, mute | Space, ⇧← / ⇧→, M |
 | Play a Live Photo | L (or the ◉ LIVE button) |
+| Show faces and names | F (or the ☺ Faces button) |
+| Remove photos from the person shown | ⌥⌫ (or right-click ▸ Not …) |
 | **App** | |
 | Settings (appearance, 12/24-hour time) | ⌘, or the ⚙ toolbar button |
 | Close window | ⌘W |
@@ -306,6 +342,8 @@ photolibrary/
 │   ├── search.py          Search box parsing (filename and dates)
 │   ├── trash.py           Move to Trash plus index and thumbnail cleanup
 │   ├── live_photos.py     Pairs Live Photo stills with their motion clips
+│   ├── faces.py           People: face models (download and checksum), finding faces in photos
+│   ├── people.py          People: grouping face fingerprints (DBSCAN) and keeping names stable
 │   ├── watcher.py         Folder watching (watchdog: FSEvents, ReadDirectoryChangesW) with change batching
 │   ├── thumbnail_warmer.py Background creation of missing thumbnails and covers
 │   ├── cache_cleanup.py   Removes thumbnails no indexed file needs
@@ -341,7 +379,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 201 tests (one to two minutes). It includes headless UI tests that drive the
+The suite has 243 tests (one to two minutes). It includes headless UI tests that drive the
 real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 folder watching, theme changes, the freeze monitor and pausing thumbnail work during
 playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):

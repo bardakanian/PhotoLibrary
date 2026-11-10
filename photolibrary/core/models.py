@@ -65,6 +65,52 @@ class Album:
 
 
 @dataclass(frozen=True, slots=True)
+class Person:
+    """A group of faces found to be the same person (see core/people.py)."""
+
+    id: int
+    name: str              # "" until the user names them
+    count: int             # photos they appear in
+    cover: MediaItem | None
+    box: tuple[float, float, float, float] | None = None  # the cover face, as fractions of the photo
+    hidden: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PeopleGroup:
+    """Several people together, like "Family": shows the photos in which they all appear."""
+
+    id: int
+    name: str
+    members: tuple[int, ...]   # person ids
+    count: int                 # shown photos with every member in them
+    cover: MediaItem | None
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoFace:
+    """A face in one photo, for the viewer's face boxes."""
+
+    id: int
+    box: tuple[float, float, float, float]  # x, y, w, h as fractions of the photo
+    person_id: int | None
+    name: str = ""         # the person's name ("" if unnamed or no person)
+    confirmed: bool = False  # set by the user, so regrouping leaves it alone
+
+
+@dataclass(frozen=True, slots=True)
+class FaceSuggestion:
+    """"Is this Ana?": a face in no person that looks like someone."""
+
+    face_id: int
+    item: MediaItem
+    box: tuple[float, float, float, float]
+    person_id: int
+    name: str
+    similarity: float
+
+
+@dataclass(frozen=True, slots=True)
 class YearMediaCount:
     year: int
     photos: int

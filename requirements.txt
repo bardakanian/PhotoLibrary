@@ -3,3 +3,4 @@ Pillow>=10
 pillow-heif>=0.18
 imageio-ffmpeg>=0.5
 watchdog>=4
+opencv-python-headless>=4.10

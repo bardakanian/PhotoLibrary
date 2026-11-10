@@ -1,5 +1,5 @@
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from ...core.zoom import ZoomState
@@ -17,6 +17,7 @@ class ImageCanvas(QWidget):
 
     zoom_changed = Signal(float)          # scale in device pixels per image pixel (1.0 = actual size)
     needs_full_resolution = Signal()
+    face_clicked = Signal(int, QPoint)    # index into the faces from set_faces, global position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,6 +31,10 @@ class ImageCanvas(QWidget):
         self._message = ""
         self._message_font = QFont()
         self._message_font.setPixelSize(15)
+        self._faces: list[tuple] = []  # (box as fractions of the photo, label, confirmed)
+        self._face_font = QFont()
+        self._face_font.setPixelSize(12)
+        self._face_font.setWeight(QFont.Weight.DemiBold)
 
     # Content ---------------------------------------------------------------
 
@@ -59,6 +64,40 @@ class ImageCanvas(QWidget):
         self._pixmap = pixmap
         self._emit_zoom()
         self.update()
+
+    def set_faces(self, faces: list[tuple]) -> None:
+        """Outline these faces, each (box, label, confirmed); an empty list hides them."""
+        self._faces = list(faces)
+        self.update()
+
+    def face_rects(self) -> list[QRectF]:
+        """Where each face is on screen right now (follows zoom and pan)."""
+        if self._state is None or self._pixmap is None:
+            return []
+        x, y, width, height = self._state.target_rect()
+        return [QRectF(x + box[0] * width, y + box[1] * height, box[2] * width, box[3] * height)
+                for box, _label, _confirmed in self._faces]
+
+    def _paint_faces(self, painter: QPainter) -> None:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._face_font)
+        metrics = painter.fontMetrics()
+        for rect, (_box, label, confirmed) in zip(self.face_rects(), self._faces):
+            # A dark outline under a light one stays visible on any photo.
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(0, 0, 0, 120), 4))
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.setPen(QPen(QColor("#FFFFFF") if confirmed else QColor(255, 255, 255, 200), 2,
+                                Qt.PenStyle.SolidLine if confirmed else Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(rect, 6, 6)
+            text = metrics.elidedText(label, Qt.TextElideMode.ElideRight, 220)
+            pill = QRectF(0, 0, metrics.horizontalAdvance(text) + 16, metrics.height() + 6)
+            pill.moveCenter(QPointF(rect.center().x(), rect.bottom() + 6 + pill.height() / 2))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 170))
+            painter.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
 
     def set_message(self, text: str) -> None:
         self._message = text
@@ -157,6 +196,8 @@ class ImageCanvas(QWidget):
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 x, y, width, height = self._state.target_rect()
                 painter.drawPixmap(QRectF(x, y, width, height), self._pixmap, QRectF(self._pixmap.rect()))
+                if self._faces:
+                    self._paint_faces(painter)
             elif self._message:
                 painter.setPen(QColor("#A6ADBA"))
                 painter.setFont(self._message_font)
@@ -190,6 +231,12 @@ class ImageCanvas(QWidget):
             self.toggle_actual_size(event.position())
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._faces:
+            for index, rect in enumerate(self.face_rects()):
+                if rect.contains(event.position()):
+                    self.face_clicked.emit(index, event.globalPosition().toPoint())
+                    event.accept()
+                    return
         if event.button() == Qt.MouseButton.LeftButton and not self.is_fitted:
             self._drag_origin = event.position()
             self._update_cursor()

@@ -25,11 +25,12 @@ class _Relay(QObject):
 
 
 class _Task(QRunnable):
-    def __init__(self, fn: Callable[[], object], relay: _Relay):
+    def __init__(self, fn: Callable[[], object], relay: _Relay, pool: QThreadPool):
         super().__init__()
         self.setAutoDelete(False)
         self.fn = fn
         self.relay = relay
+        self.pool = pool
 
     def run(self) -> None:
         try:
@@ -59,6 +60,14 @@ def run_async(pool: QThreadPool, fn: Callable[[], object],
             return
         on_done(result)
 
-    task = _Task(fn, _Relay(finished))
+    task = _Task(fn, _Relay(finished), pool)
     _active.add(task)
     pool.start(task)
+
+
+def cancel_queued(pool: QThreadPool) -> None:
+    """Drop `pool`'s tasks that haven't started (their callbacks never run). Use instead of
+    pool.clear(), which would leave them in `_active` for good. Must be called from the UI thread."""
+    for task in [task for task in _active if task.pool is pool]:
+        if pool.tryTake(task):  # True only if it was still queued, so never a running task
+            _active.discard(task)

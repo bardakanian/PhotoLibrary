@@ -4,7 +4,7 @@ import time
 import unittest
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -62,6 +62,10 @@ class WindowTestCase(TempAppTestCase):
         self.window.close()
         self.settle(0.2)
         self.window.deleteLater()
+        # processEvents() never runs deferred deletes outside an event loop: without this every
+        # window stayed alive, and each new stylesheet restyled all of them (the suite took 10 min).
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.window = None
         self.settle(0.1)
         super().tearDown()
 

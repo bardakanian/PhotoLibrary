@@ -4,7 +4,7 @@ from pathlib import Path
 APP_NAME = "Photo Library"
 # The one place the version lives. Bump it with every change (minor: features, patch: fixes)
 # and add a matching entry to CHANGELOG.md.
-VERSION = "1.8.0"
+VERSION = "1.17.0"
 # PHOTO_LIBRARY_HOME points the app at a separate data folder (demos, smoke tests).
 APP_DIR = Path(os.environ.get("PHOTO_LIBRARY_HOME") or Path.home() / ".photo_library").expanduser()
 CONFIG_FILE = APP_DIR / "config.json"
@@ -29,5 +29,5 @@ COVER_EDGE = 1600
 BATCH_COMMIT_SIZE = 250
 # Bump when read_metadata learns something new, so the next scan re-reads every file.
 # 2: no copy-time dates for metadata-less files; 3: ignore epoch/unset-clock dates;
-# 4: detect Live Photo motion clips
-METADATA_VERSION = 4
+# 4: detect Live Photo motion clips; 5: video dates in the camera's local time
+METADATA_VERSION = 5

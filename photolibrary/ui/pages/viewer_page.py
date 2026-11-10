@@ -19,6 +19,8 @@ class ViewerPage(QWidget):
     closed = Signal()
     current_changed = Signal(object)          # MediaItem
     open_externally_requested = Signal(object)
+    faces_needed = Signal(object)             # MediaItem whose faces should be shown
+    face_menu_requested = Signal(object, object)  # PhotoFace, global QPoint
 
     def __init__(self, thumbnails: ThumbnailLoader, parent=None):
         super().__init__(parent)
@@ -72,6 +74,12 @@ class ViewerPage(QWidget):
         self.fit_button = self._button("Fit", "Zoom to fit (⌘0)")
         self.fit_button.clicked.connect(lambda: self.canvas.toggle_actual_size())
         bar.addWidget(self.fit_button)
+        self.faces_button = self._button("☺  Faces", "Show the people in this photo (F)")
+        self.faces_button.setCheckable(True)
+        self.faces_button.toggled.connect(self._faces_toggled)
+        self.faces_button.hide()  # only offered while People is on
+        bar.addWidget(self.faces_button)
+        self.faces = []  # PhotoFace list for the current photo
         self.live_button = self._button("◉ LIVE", "Play the Live Photo (L)")
         self.live_button.clicked.connect(self.play_live)
         self.live_button.hide()
@@ -88,6 +96,7 @@ class ViewerPage(QWidget):
         self.canvas = ImageCanvas()
         self.canvas.zoom_changed.connect(self._zoom_changed)
         self.canvas.needs_full_resolution.connect(self._request_full_resolution)
+        self.canvas.face_clicked.connect(self._face_clicked)
         self.video = VideoPlayer()
         self.video.open_externally_requested.connect(lambda: self.open_externally_requested.emit(self.current_item))
         self.content.addWidget(self.canvas)
@@ -109,6 +118,7 @@ class ViewerPage(QWidget):
         shortcut("Shift+Right", lambda: self.video.seek_by(5000))
         shortcut("M", self.video.toggle_mute)
         shortcut("L", self.play_live)
+        shortcut("F", lambda: self.faces_button.isVisible() and self.faces_button.toggle())
         self._live_playing = False
         self.video.player.mediaStatusChanged.connect(self._live_status)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -201,6 +211,8 @@ class ViewerPage(QWidget):
         self._full_requested.clear()
         self._live_playing = False
         self.live_button.setVisible(item.is_live)
+        self.faces = []
+        self.canvas.set_faces([])
         self.current_changed.emit(item)
         if item.is_video:
             self.zoom_label.clear()
@@ -214,6 +226,8 @@ class ViewerPage(QWidget):
             self.fit_button.show()
             self.content.setCurrentWidget(self.canvas)
             self._show_photo(item)
+            if self.faces_button.isChecked():
+                self.faces_needed.emit(item)
         self._prefetch_neighbours()
 
     def _show_photo(self, item: MediaItem) -> None:
@@ -272,6 +286,34 @@ class ViewerPage(QWidget):
         self.zoom_label.setText("Fit" if self.canvas.is_fitted else f"{round(scale * 100)}%")
         self.fit_button.setText("100%" if self.canvas.is_fitted else "Fit")
         self.fit_button.setToolTip("Actual size (⌘0)" if self.canvas.is_fitted else "Zoom to fit (⌘0)")
+
+    # Faces ---------------------------------------------------------------
+
+    def set_faces_available(self, available: bool) -> None:
+        self.faces_button.setVisible(available)
+        if not available:
+            self.faces_button.setChecked(False)
+
+    def set_faces(self, item_id: int, faces: list) -> None:
+        """Faces of photo `item_id` (PhotoFace); ignored if another photo is showing by now."""
+        item = self.current_item
+        if item is None or item.id != item_id or not self.faces_button.isChecked():
+            return
+        self.faces = list(faces)
+        self.canvas.set_faces([(face.box, face.name or ("Unnamed person" if face.person_id else "Who is this?"),
+                                face.confirmed) for face in self.faces])
+
+    def _faces_toggled(self, shown: bool) -> None:
+        item = self.current_item
+        if shown and item is not None and not item.is_video:
+            self.faces_needed.emit(item)
+        else:
+            self.faces = []
+            self.canvas.set_faces([])
+
+    def _face_clicked(self, index: int, position) -> None:
+        if 0 <= index < len(self.faces):
+            self.face_menu_requested.emit(self.faces[index], position)
 
     def play_live(self) -> None:
         """Play a Live Photo's motion clip over the photo, then return to the still."""

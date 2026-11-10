@@ -2,6 +2,7 @@ from PySide6.QtCore import QObject, QEvent, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
+from .check_style import ThemedStyle
 from .colors import DARK, LIGHT, Palette
 from .stylesheet import build_stylesheet
 
@@ -14,6 +15,10 @@ class ThemeManager(QObject):
         self.app = app
         self.preference = preference
         self._applied: str | None = None  # "light" or "dark" currently in the stylesheet
+        # Visible checkboxes in both themes. Kept here: once a stylesheet is set, app.style() is
+        # Qt's stylesheet wrapper, not this style.
+        self.style = ThemedStyle("Fusion")
+        app.setStyle(self.style)
         app.installEventFilter(self)
         self.apply(preference)
 
@@ -33,8 +38,12 @@ class ThemeManager(QObject):
             preference = "system"
         self.preference = preference
         self._applied = self.resolved
-        self.app.setStyleSheet(build_stylesheet(self.colors))
+        self._apply_colors()
         self.changed.emit(preference)
+
+    def _apply_colors(self) -> None:
+        self.style.colors = self.colors
+        self.app.setStyleSheet(build_stylesheet(self.colors))
 
     def eventFilter(self, watched, event):
         # Windows reports palette changes for many reasons (accent colour, Night light, display
@@ -43,6 +52,6 @@ class ThemeManager(QObject):
         if (event.type() == QEvent.Type.ApplicationPaletteChange and watched is self.app
                 and self.preference == "system" and self.resolved != self._applied):
             self._applied = self.resolved
-            self.app.setStyleSheet(build_stylesheet(self.colors))
+            self._apply_colors()
             self.changed.emit(self.preference)
         return super().eventFilter(watched, event)

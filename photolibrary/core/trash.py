@@ -18,6 +18,8 @@ from .models import MediaItem
 class TrashResult:
     trashed: list[MediaItem] = field(default_factory=list)
     failed: list[tuple[MediaItem, str]] = field(default_factory=list)
+    # Motion clips left behind when their photo was trashed: now shown as videos of their own.
+    unpaired: list[int] = field(default_factory=list)
 
     @property
     def trashed_ids(self) -> set[int]:
@@ -66,9 +68,13 @@ def trash_items(folders: Folders, items: Sequence[MediaItem], move_to_trash: Cal
             problem = _move(Path(item.live_video), roots, move_to_trash)
             if problem:
                 result.failed.append((item, f"The photo was moved, but its Live Photo video was not: {problem}"))
+                result.unpaired.append(item.live_video_id)
             else:
                 removed_ids.append(item.live_video_id)
 
+    if result.unpaired:
+        # Still paired, the clip would stay hidden (and so untrashable) until the next rescan.
+        repository.unpair_live(result.unpaired)
     if removed_ids:
         repository.remove_many(roots, removed_ids)
         for item in result.trashed:

@@ -71,8 +71,8 @@ Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mov':
         self.assertEqual((meta.width, meta.height), (1080, 1920))
         self.assertAlmostEqual(meta.duration, 65.5)
         self.assertEqual(meta.camera, "Apple iPhone 12")
-        expected = datetime.fromisoformat("2022-07-04T11:30:00-07:00").astimezone().replace(tzinfo=None)
-        self.assertEqual(meta.captured_at, expected)
+        # The camera's wall-clock time, whatever time zone this Mac is in (as photos' EXIF dates).
+        self.assertEqual(meta.captured_at, datetime(2022, 7, 4, 11, 30))
 
     @unittest.skipUnless(media.FFMPEG_ENABLED, "ffmpeg not installed")
     def test_real_video_metadata(self):
