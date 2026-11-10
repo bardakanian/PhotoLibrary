@@ -125,8 +125,9 @@ incremental indexer) come from the On This Day app.
 ## Screenshots
 
 These screenshots come from a synthetic demo library of computer-drawn landscapes with
-made-up dates. They contain no personal photos, file paths or metadata. To regenerate
-them, run `python tools/make_screenshots.py`.
+made-up dates. The people are made up too: cartoon portraits drawn by the script and recognised
+by a stand-in face engine, so no real faces or face models are involved. They contain no
+personal photos, file paths or metadata. To regenerate them, run `python tools/make_screenshots.py`.
 
 ### Library with the info panel
 
@@ -134,6 +135,32 @@ All Photos grouped by month, with albums in the sidebar and a multi-item selecti
 summarised in the info panel.
 
 ![All Photos grid with sidebar, a selection of four photos and the info panel](assets/screenshots/library.png)
+
+### People
+
+A person's photos, with named people, unnamed people (the few-photo ones folded behind
+"Show 1 More…") and a group in the sidebar.
+
+![People in the sidebar and Maya's photos in the grid](assets/screenshots/people.png)
+
+### A group
+
+The Family group shows only the photos in which everyone in it appears together. Review
+Suggestions sits at the top of People when there is something to ask.
+
+![The Family group with photos of Maya and Leo together](assets/screenshots/group.png)
+
+### Review People
+
+"Is this Nora?": a face that wasn't grouped, next to the named person it looks like.
+
+![Review People asking whether a face is Nora](assets/screenshots/review.png)
+
+### Faces in the viewer
+
+Press F to outline each face with its name; click a face to confirm or correct it.
+
+![Viewer with named face boxes for Maya and Leo](assets/screenshots/viewer-faces.png)
 
 ### Years
 
