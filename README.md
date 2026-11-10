@@ -11,7 +11,14 @@ incremental indexer) come from the On This Day app.
 ## Features
 
 - **Library folders** chosen once and remembered. It's indexed in the background with a
-  progress bar. Every launch, and **Rescan**, picks up added, changed and deleted files.
+  progress bar. Every launch, and **Rescan**, picks up added, changed and deleted files. When
+  nothing changed this is a quick check (under a second for about 36,000 files): only new or
+  edited files are read. After an update that reads files in a new way (say, better video
+  dates), every file is read once more on the next launch. Quitting part-way loses nothing;
+  the next launch carries on.
+- **Capture dates** come from the photo's own EXIF date, a video's camera date (in the
+  camera's local time, as for photos), or Spotlight. For files with none of those, the earlier
+  of the file's creation and modification time is used, never the time it was copied.
 - **Several folders in one library:** **Add Folder** (⌘O) adds another folder, for
   example `~/Pictures` plus a backup drive. Their photos merge into one timeline, and the
   sidebar's **Folders** section shows each folder on its own. Remove a folder from File ▸
@@ -46,12 +53,15 @@ incremental indexer) come from the On This Day app.
   matched photos out of a person, select them and right-click ▸ **Not Ana – Remove from Ana**
   (or press ⌥⌫, which also works on the photo open in the viewer).
   - **Review Suggestions** (top of the People section, or ⇧⌘P) asks about faces that look like
-    someone but weren't grouped with them: "Is this Ana?" Answer with Y, N, or → to skip. Your
-    answers are kept, even when people are regrouped.
+    someone you have named but weren't grouped with them: "Is this Ana?" Answer with Y, N, or →
+    to skip. Your answers are kept, even when people are regrouped. Only named people are
+    suggested, so name someone to get suggestions for them; the many unnamed groups (mostly
+    passers-by) never produce questions.
   - **Groups:** right-click a person ▸ **Add to Group** ▸ **New Group…** (or View ▸ New
     Group…), name it and tick its people. The group, under **Groups** in the sidebar, shows the
     photos in which everyone in it appears together. Right-click a group to rename it, edit its
-    members or delete it; deleting a group never touches its people or photos.
+    members or delete it; deleting a group never touches its people or photos. A member stays in
+    the group even while none of their photos are shown (for example, only in a hidden album).
   - **Check Faces:** right-click a person ▸ **Check Faces (Least Typical First)** (or View ▸
     Least Typical Faces First) to list their photos with the least typical face first. Wrong
     matches gather at the top, so a quick look there is enough to check a person.
@@ -60,8 +70,9 @@ incremental indexer) come from the On This Day app.
     new person, which fixes one face in a group photo without touching the others.
   - **Private:** faces are found and grouped on your computer. No photo or face leaves it.
   - **Names are kept:** they survive moving or renaming photos and folders, re-analysis, and even
-    a lost database: names, hidden people and each person's reference face are also backed up to
-    `~/.photo_library/people.json` (private: it holds face fingerprints, not photos).
+    a lost database: names, hidden people, groups (unnamed members included) and each person's
+    reference face are also backed up to `~/.photo_library/people.json` (private: it holds face
+    fingerprints, not photos).
   - **How:** two open models from the [OpenCV model zoo](https://github.com/opencv/opencv_zoo),
     YuNet (finds faces, MIT licence) and SFace (face fingerprints, Apache 2.0), downloaded
     once (about 38 MB) and checked against fixed checksums. Fingerprints are grouped with
@@ -163,6 +174,8 @@ Open **Settings** with ⌘, or the ⚙ button at the right end of the toolbar (a
   clock (13:30). It applies wherever a capture time is shown, such as the viewer header.
 - **Update automatically when files change** (on by default): turn off to rely on
   Rescan (⌘R) instead.
+- **Find people in photos** (off by default): turns on People. The first time, the two face
+  models (about 38 MB) are downloaded. It needs OpenCV (`opencv-python-headless`).
 
 Qt Multimedia's informational messages (the "Using Qt multimedia with FFmpeg" banner
 and FFmpeg's per-file stream details) are hidden. Warnings and errors still appear. To
@@ -279,9 +292,9 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | Play / pause, skip 5 s, mute | Space, ⇧← / ⇧→, M |
 | Play a Live Photo | L (or the ◉ LIVE button) |
 | Show faces and names | F (or the ☺ Faces button) |
-| Remove photos from the person shown | ⌥⌫ (or right-click ▸ Not …) |
+| Remove photos from the person shown | ⌥⌫ in the grid or viewer (or right-click ▸ Not …) |
 | **App** | |
-| Settings (appearance, 12/24-hour time) | ⌘, or the ⚙ toolbar button |
+| Settings (appearance, 12/24-hour time, People) | ⌘, or the ⚙ toolbar button |
 | Close window | ⌘W |
 
 ## How it stays fast
@@ -310,6 +323,8 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
     read-ahead give the same smooth scrolling at a fixed memory cost.
   - **Sharp covers.** Years and Months tiles are far bigger than grid cells, so each cover
     also gets a 1,600 px version, about one per month and per year.
+  - **Tried again.** A thumbnail that couldn't be made (a drive asleep or unplugged) is tried
+    again after 30 seconds; a file that really can't be read is remembered on disk and skipped.
   - **Cleaned up.** Editing, moving or deleting a file leaves its old thumbnail behind. After
     preparation, `core/cache_cleanup.py` deletes thumbnails no indexed file needs, so the
     cache doesn't grow forever.
@@ -361,9 +376,9 @@ photolibrary/
     ├── tasks.py           run_async helper for background work
     ├── freeze_monitor.py  Logs what every thread was doing when the UI stalls
     ├── viewer_images.py   Background full-size photo decoding for the viewer
-    ├── pages/             Grid page, full-window viewer and Library Insights
-    ├── theme/             Colours, typography, metrics, stylesheet
-    └── widgets/           Sidebar, info panel, image canvas, video player, empty state, search box
+    ├── pages/             Grid page, full-window viewer, Library Insights and Review People
+    ├── theme/             Colours, typography, metrics, stylesheet, themed checkboxes
+    └── widgets/           Sidebar, info panel, image canvas, video player, face pictures, empty state, search box
 tests/                     unittest suite: core modules, plus tests/ui (the real window, headless)
 tools/make_demo_library.py Synthetic library generator
 tools/make_launcher.py     Builds the macOS launcher app or the Windows shortcut
@@ -379,10 +394,11 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 243 tests (one to two minutes). It includes headless UI tests that drive the
-real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
-folder watching, theme changes, the freeze monitor and pausing thumbnail work during
-playback) on a generated library. To skip the UI tests while iterating (about 20 seconds):
+The suite has 252 tests (about a minute and a half). It includes headless UI tests that drive
+the real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
+People, groups and Review, folder watching, theme changes, the freeze monitor and pausing
+thumbnail work during playback) on a generated library. People tests use a fake face engine,
+so they need no models. To skip the UI tests while iterating (about 25 seconds, mostly the folder-watching tests):
 
 ```bash
 SKIP_UI_TESTS=1 python -m unittest
