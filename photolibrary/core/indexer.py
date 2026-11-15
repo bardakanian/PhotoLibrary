@@ -225,6 +225,8 @@ class MediaIndexer:
                 pending = 0
             progress(force=True)
 
+            # The folder is in the library again: its index now lists the thumbnails it needs.
+            connection.execute("DELETE FROM removed_files WHERE folder_root = ?", (self.folder_root,))
             deleted = 0
             skipped = tuple(directory + os.sep for directory in unreadable)
             for file_path in set(cached) - seen:

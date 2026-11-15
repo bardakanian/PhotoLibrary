@@ -45,6 +45,8 @@ class ImageCanvas(QWidget):
         self._natural_from_pixmap = not natural
         self._natural = natural or (self._pixmap_size(pixmap) if pixmap else None)
         self._state = ZoomState.fitted(*self._natural, self.width(), self.height()) if self._natural else None
+        self._drag_origin = None
+        self._update_cursor()  # fitted again: no hand cursor left over from a zoomed photo
         self._emit_zoom()
         self.update()
 
@@ -110,6 +112,8 @@ class ImageCanvas(QWidget):
         self._state = None
         self._natural = None
         self._message = ""
+        self._drag_origin = None
+        self._update_cursor()
         self.update()
 
     @staticmethod

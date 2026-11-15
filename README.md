@@ -23,9 +23,14 @@ incremental indexer) come from the On This Day app.
   example `~/Pictures` plus a backup drive. Their photos merge into one timeline, and the
   sidebar's **Folders** section shows each folder on its own. Remove a folder from File ▸
   Remove Folder from Library or by right-clicking it in the sidebar. Its files stay on disk;
-  only the app's index of it is dropped. Folders can't overlap (one inside another). If a
+  only the app's index of it is dropped. Its thumbnails are kept, so adding the folder back is
+  quick (its photos are indexed and analysed for faces again); Settings can free that space. Folders can't overlap (one inside another). If a
   folder is missing, for example an unplugged drive, its photos stay in the library and the
   other folders keep updating.
+- **Time left:** indexing, preparing thumbnails and finding people show an estimate in the
+  status bar ("about 3 min left") that counts down steadily, and say how long they took when
+  they finish. A job that ran over a minute posts a notification when it's done, and bounces the
+  Dock icon if you're in another app.
 - **Updates by itself:** the folder is watched (FSEvents on macOS, ReadDirectoryChangesW on
   Windows), so photos you add, move between folders or delete show up a few seconds later,
   with no ⌘R needed. Every library folder is watched. A big copy is handled as one update once it finishes. Just viewing or
@@ -201,6 +206,10 @@ Open **Settings** with ⌘, or the ⚙ button at the right end of the toolbar (a
   clock (13:30). It applies wherever a capture time is shown, such as the viewer header.
 - **Update automatically when files change** (on by default): turn off to rely on
   Rescan (⌘R) instead.
+- **Storage**: how much space thumbnails use. **Free Space from Removed Folders** deletes the
+  thumbnails kept for folders you removed from the library; **Delete All Thumbnails…** (asks
+  first) deletes every thumbnail, and they are made again in the background. Photos are never
+  touched.
 - **Find people in photos** (off by default): turns on People. The first time, the two face
   models (about 38 MB) are downloaded. It needs OpenCV (`opencv-python-headless`).
 
@@ -354,7 +363,8 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
     again after 30 seconds; a file that really can't be read is remembered on disk and skipped.
   - **Cleaned up.** Editing, moving or deleting a file leaves its old thumbnail behind. After
     preparation, `core/cache_cleanup.py` deletes thumbnails no indexed file needs, so the
-    cache doesn't grow forever.
+    cache doesn't grow forever. Thumbnails of a folder removed from the library are kept
+    (until it's scanned again or freed in Settings), so adding it back doesn't rebuild them.
 - **The UI thread never reads files or the database.** Queries, grouping, settings
   writes and thumbnail decoding run in the background (`ui/tasks.py`). Python hands the
   GIL around every 1 ms instead of 5 ms, so that pure-Python background work (scans,
@@ -392,6 +402,7 @@ photolibrary/
 │   ├── cache.py           Cost-bounded LRU cache
 │   ├── workqueue.py       Re-prioritisable background job queue
 │   ├── formatting.py      Labels for sizes, durations, dates
+│   ├── progress.py        Time-left estimates for long jobs
 │   ├── zoom.py            Viewer zoom and pan arithmetic
 │   └── settings.py        Remembered settings (JSON)
 └── ui/
@@ -402,6 +413,7 @@ photolibrary/
     ├── thumbnails.py      Background thumbnail loader and pixmap cache
     ├── tasks.py           run_async helper for background work
     ├── freeze_monitor.py  Logs what every thread was doing when the UI stalls
+    ├── notifications.py   System notifications when a long job finishes
     ├── viewer_images.py   Background full-size photo decoding for the viewer
     ├── pages/             Grid page, full-window viewer, Library Insights and Review People
     ├── theme/             Colours, typography, metrics, stylesheet, themed checkboxes
@@ -421,7 +433,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 252 tests (about a minute and a half). It includes headless UI tests that drive
+The suite has 270 tests (about a minute and a half). It includes headless UI tests that drive
 the real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 People, groups and Review, folder watching, theme changes, the freeze monitor and pausing
 thumbnail work during playback) on a generated library. People tests use a fake face engine,

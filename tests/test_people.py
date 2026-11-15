@@ -380,6 +380,25 @@ class PeopleLibraryTests(TempAppTestCase):
         self.assertTrue(next(person for person in self.people() if person.name == "Ben").hidden)
         self.assertEqual(self.repo.restore_people_backup(), 0)  # nothing missing now: no duplicates
 
+    def test_the_backup_is_written_by_one_thread_at_a_time(self):
+        import json
+        self.analyze()
+        first, second = self.people()
+        self.repo.rename_person(first.id, "Ana")
+
+        def write(times: int):
+            for _ in range(times):
+                self.repo.write_people_backup()
+
+        threads = [threading.Thread(target=write, args=(25,)) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        backup = json.loads((self.app_dir / database.PEOPLE_BACKUP).read_text())
+        self.assertEqual([entry["name"] for entry in backup["people"]], ["Ana"])
+        self.assertEqual(list(self.app_dir.glob("*.tmp")), [])
+
     def test_a_damaged_backup_is_ignored(self):
         self.app_dir.mkdir(parents=True, exist_ok=True)
         (self.app_dir / database.PEOPLE_BACKUP).write_text("{not json")

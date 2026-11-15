@@ -3,7 +3,7 @@ import logging
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QFile, QObject, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QFile, QObject, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -17,7 +17,7 @@ from ..core.indexer import index_folders
 from ..core.library_roots import root_conflict
 from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reveal_in_file_manager
 from ..core import media as media_module
-from ..core.cache_cleanup import prune_thumbnail_cache
+from ..core.cache_cleanup import cache_size, clear_thumbnail_cache, prune_thumbnail_cache
 from ..core import database as database_module
 from ..core.faces import FACES_ENABLED, ModelError, OpenCVFaceEngine, ensure_models, models_present
 from ..core.people import run_people_pass
@@ -26,6 +26,7 @@ from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
 from ..core.watcher import LibraryWatcher
 from ..core.formatting import format_size
+from ..core.progress import Eta, format_duration_words, time_left_text
 from ..core.search import SearchFilter, parse_query
 from ..core.settings import MAX_ZOOM, MIN_ZOOM, SettingsStore
 from .dialogs import GroupDialog, PreferencesDialog
@@ -40,12 +41,15 @@ from .theme import ThemeManager
 from .thumbnails import ThumbnailLoader
 from .time_format import uses_12_hour
 from .widgets import SearchBox
+from .notifications import notify
 from .viewer_images import decode_for_faces
 from .widgets.common import sidebar_icon
 from .widgets.info_panel import REVEAL_LABEL, InfoPanel
 from .widgets.sidebar import UNNAMED, Sidebar
 
 LOGGER = logging.getLogger(__name__)
+# Jobs that took this long get a notification when they finish: you've likely looked away.
+ANNOUNCE_AFTER_SECONDS = 60
 MODE_LABELS = (("years", "Years"), ("months", "Months"), ("all", "All Photos"))
 
 
@@ -73,7 +77,8 @@ class MainWindow(QMainWindow):
         self.query_request_id = 0
         self.applied_request_id = 0  # the newest query whose result the grid shows (or that failed)
         self.snapshot: LibrarySnapshot | None = None
-        self._viewer_return: tuple[int | None, int] = (None, 0)  # (opened item id, grid scroll value)
+        # (opened item id, its row then, grid scroll value): restored on return if nothing moved.
+        self._viewer_return: tuple[int | None, int, int] = (None, -1, 0)
 
         self.index_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
@@ -99,6 +104,14 @@ class MainWindow(QMainWindow):
         self.watch_retry.setInterval(30_000)
         self.watch_retry.timeout.connect(self.start_watching)
         self.warm_id = 0
+        # Time-left estimates (core/progress.py): one per folder of a scan, per warm run, per people pass.
+        self.scan_eta = Eta()
+        self.scan_eta_key: tuple | None = None
+        self.scan_started_at = Eta()
+        self.warm_eta = Eta()
+        self.warm_eta_key: tuple | None = None
+        self.people_eta = Eta()
+        self.people_eta_key: tuple | None = None
         # People: finding faces runs after warming, and pauses for scans and video like warming.
         self.people_events = IndexEvents()
         self.people_events.received.connect(self._handle_people_event)
@@ -557,6 +570,7 @@ class MainWindow(QMainWindow):
             dialog.addButton(QMessageBox.StandardButton.Cancel)
             dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
             dialog.exec()
+            dialog.deleteLater()  # read below, deleted once back in the event loop
             if dialog.clickedButton() is not remove_button:
                 return
         if self.viewer_active:
@@ -636,6 +650,8 @@ class MainWindow(QMainWindow):
             return
         event_type = event.get("type")
         if event_type == "scan_started":
+            self.scan_started_at = Eta()
+            self.scan_eta_key = None
             self.scanning = True
             self.progress.setRange(0, 0)
             self.progress.show()
@@ -650,9 +666,14 @@ class MainWindow(QMainWindow):
             if event.get("folder_count", 1) > 1:
                 folder = (f"  ·  folder {event['folder_number']} of {event['folder_count']} "
                           f"({Path(event['folder']).name})")
+            # Each folder is counted on its own, so each gets its own estimate.
+            key = (event.get("scan_id"), event.get("folder_number", 1))
+            if key != self.scan_eta_key:
+                self.scan_eta, self.scan_eta_key = Eta(), key
+            left = time_left_text(self.scan_eta.remaining(event["processed"], event["total"]))
             self.status.setText(
                 f"Indexing{folder}  ·  {event['processed']:,} of {event['total']:,}  ·  "
-                f"{event['updated']:,} new or changed"
+                f"{event['updated']:,} new or changed  ·  {left}"
             )
         elif event_type == "batch_committed":
             if not self.reload_timer.isActive():
@@ -683,7 +704,14 @@ class MainWindow(QMainWindow):
                 for key, label in (("missing_folders", "not found"), ("failed_folders", "couldn't scan")):
                     if event.get(key):
                         parts.append(f"{label}: " + ", ".join(f"“{Path(folder).name}”" for folder in event[key]))
+                took = self.scan_started_at.elapsed()
+                if took >= 10:  # a quick check needs no timing
+                    parts.append(f"took {format_duration_words(took)}")
                 self.scan_notes = parts
+                if event["updated"] or event["deleted"]:
+                    self._announce_if_long(self.scan_started_at, "Library updated",
+                                           f"{event['updated']:,} new or changed, {event['deleted']:,} removed, "
+                                           f"in {format_duration_words(took)}.")
                 # The scan counts every file; the sidebar query then corrects this for hidden albums.
                 self.library_totals = None if self.hidden_albums else (event["total_indexed"], 0)
                 self._update_ready_text(event["total_indexed"], show=True)
@@ -1152,7 +1180,7 @@ class MainWindow(QMainWindow):
     def open_viewer(self, row: int) -> None:
         """Show the item at `row` (All Photos mode) full-window. The grid stays as it was."""
         item = self.model.item_at(row)
-        self._viewer_return = (item.id if item else None, self.view.verticalScrollBar().value())
+        self._viewer_return = (item.id if item else None, row, self.view.verticalScrollBar().value())
         self.toolbar.hide()
         self.sidebar.hide()
         self.stack.setCurrentWidget(self.viewer)
@@ -1168,6 +1196,9 @@ class MainWindow(QMainWindow):
         self.toolbar.show()
         self.sidebar.setVisible(self.settings.sidebar_visible)
         self.info_panel.setVisible(self.settings.info_panel_visible)
+        # Lay the window out now: the sidebar coming back narrows the grid and re-flows its rows,
+        # which would otherwise happen after the scroll below and push the photo off screen.
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
         self.info_timer.start()
         row = self.model.row_for_item_id(item.id) if item else None
         if row is not None:
@@ -1175,8 +1206,9 @@ class MainWindow(QMainWindow):
             # Select the last viewed item; scrolls only if it is off screen, so the grid is where you left it.
             self.view.selectionModel().setCurrentIndex(
                 index, self.view.selectionModel().SelectionFlag.ClearAndSelect)
-            opened_id, scroll = self._viewer_return
-            if item.id == opened_id:
+            opened_id, opened_row, scroll = self._viewer_return
+            # A new sort order, or photos added or removed above it, moves the item: then show it instead.
+            if item.id == opened_id and row == opened_row:
                 self.view.verticalScrollBar().setValue(scroll)
             else:
                 self.view.scrollTo(index)
@@ -1315,10 +1347,14 @@ class MainWindow(QMainWindow):
             return
         if event["type"] == "progress":
             done, total = event["done"], event["total"]
+            if self.warm_eta_key != (event["id"], total):
+                self.warm_eta, self.warm_eta_key = Eta(), (event["id"], total)
             self.progress.setRange(0, max(1, total))
             self.progress.setValue(done)
             self.progress.show()
-            self.status.setText(f"Preparing thumbnails  ·  {done:,} of {total:,}  ·  scrolling gets faster as this finishes")
+            self.status.setText(f"Preparing thumbnails  ·  {done:,} of {total:,}  ·  "
+                                f"{time_left_text(self.warm_eta.remaining(done, total))}  ·  "
+                                "scrolling gets faster as this finishes")
         elif event["type"] == "done":
             self.warm_pending = False
             result: WarmResult = event["result"]
@@ -1326,9 +1362,15 @@ class MainWindow(QMainWindow):
             pruned = event.get("pruned")
             notes = []
             if result.missing and not result.cancelled:
-                notes.append("all thumbnails ready")
+                took = self.warm_eta.elapsed() if self.warm_eta_key and self.warm_eta_key[0] == event["id"] else 0
+                notes.append(f"all thumbnails ready (in {format_duration_words(took)})" if took >= 10
+                             else "all thumbnails ready")
                 if result.failed:
                     notes.append(f"{result.failed:,} without a preview")
+                if took:
+                    self._announce_if_long(self.warm_eta, "Thumbnails ready",
+                                           f"{result.created:,} thumbnails made in {format_duration_words(took)}. "
+                                           "Scrolling is now instant.")
             if pruned and pruned.removed:
                 notes.append(f"freed {format_size(pruned.freed_bytes)} of old thumbnails")
             if notes:
@@ -1392,17 +1434,26 @@ class MainWindow(QMainWindow):
             self.status.setText("Downloading the face models (about 38 MB, once)…")
         elif kind == "progress":
             done, total = event["done"], event["total"]
+            if self.people_eta_key != (event["id"], total):
+                self.people_eta, self.people_eta_key = Eta(), (event["id"], total)
             self.progress.setRange(0, max(1, total))
             self.progress.setValue(done)
             self.progress.show()
-            self.status.setText(f"Finding people  ·  {done:,} of {total:,} photos")
+            self.status.setText(f"Finding people  ·  {done:,} of {total:,} photos  ·  "
+                                f"{time_left_text(self.people_eta.remaining(done, total))}")
         elif kind == "cancelled":
             self.progress.hide()
         elif kind == "done":
             self.people_pending = False
             self.progress.hide()
-            if event["result"].analyzed:
-                self.status.setText(self.ready_text + f"  ·  people updated from {event['result'].analyzed:,} photos")
+            analyzed = event["result"].analyzed
+            if analyzed:
+                took = self.people_eta.elapsed() if self.people_eta_key and self.people_eta_key[0] == event["id"] else 0
+                timing = f" in {format_duration_words(took)}" if took >= 10 else ""
+                self.status.setText(self.ready_text + f"  ·  people updated from {analyzed:,} photos{timing}")
+                if took:
+                    self._announce_if_long(self.people_eta, "People updated",
+                                           f"{analyzed:,} photos analysed for faces in {format_duration_words(took)}.")
             self.reload_sidebar()
             if self.scope_kind in ("person", "group"):
                 self.reload_library()
@@ -1429,6 +1480,7 @@ class MainWindow(QMainWindow):
         dialog.addButton(QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.exec()
+        dialog.deleteLater()
         if dialog.clickedButton() is merge:
             if self.scope_kind == "person" and self.scope_album == other:
                 self.sidebar.select_scope("person", None, keep, notify=False)
@@ -1490,6 +1542,7 @@ class MainWindow(QMainWindow):
                     lambda repository: repository.assign_face(face.id, person.id)))
         menu.addAction("New Person…", lambda: self._name_face(face))
         self._exec_menu(menu, position)
+        menu.deleteLater()
 
     def _exec_menu(self, menu: QMenu, position) -> None:
         """Show a context menu. Separate so tests can choose an action instead of a person."""
@@ -1579,7 +1632,10 @@ class MainWindow(QMainWindow):
     def _open_group_dialog(self, title: str, name: str = "", members=()) -> tuple[str, list[int]] | None:
         """Ask for a group's name and people. Separate so tests can answer it."""
         dialog = GroupDialog(self.people_list, name, members, title, self)
-        return (dialog.selected_name, dialog.selected_members) if dialog.exec() else None
+        try:
+            return (dialog.selected_name, dialog.selected_members) if dialog.exec() else None
+        finally:
+            dialog.deleteLater()
 
     def new_group(self, members) -> None:
         if not self.settings.find_people:
@@ -1625,6 +1681,7 @@ class MainWindow(QMainWindow):
         dialog.addButton(QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.exec()
+        dialog.deleteLater()
         if dialog.clickedButton() is delete:
             self._change_people(lambda repository: repository.delete_group(group_id))
 
@@ -1772,6 +1829,7 @@ class MainWindow(QMainWindow):
         label = "Move to Trash…" if single else f"Move {len(items):,} Items to Trash…"
         menu.addAction(label, self.move_to_trash)
         self._exec_menu(menu, self.view.viewport().mapToGlobal(position))
+        menu.deleteLater()  # it holds the selection: kept, every right-click would keep its items alive
 
     def move_to_trash(self) -> None:
         items = self.target_items()
@@ -1806,6 +1864,7 @@ class MainWindow(QMainWindow):
         dialog.addButton(QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.exec()
+        dialog.deleteLater()
         if dialog.clickedButton() is not move_button:
             return
 
@@ -1896,29 +1955,129 @@ class MainWindow(QMainWindow):
     def show_preferences(self) -> None:
         dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self,
                                    find_people=self.settings.find_people, faces_available=FACES_ENABLED)
-        if dialog.exec():
-            if dialog.selected_find_people != self.settings.find_people:
-                self.settings.find_people = dialog.selected_find_people
-                self.review_action.setEnabled(self.settings.find_people)
-                self.new_group_action.setEnabled(self.settings.find_people)
-                self.viewer.set_faces_available(self.settings.find_people)
-                if self.settings.find_people:
-                    self.start_people()
-                else:
-                    self.stop_people()
-                    self.people_pending = False
-                    if self.scope_kind in ("person", "group"):
-                        self.sidebar.select_scope("all", None, None)
-                self.reload_sidebar()
-            self.settings.theme = dialog.selected_theme
-            self.settings.time_format = dialog.selected_time_format
-            if dialog.selected_watch_folder != self.settings.watch_folder:
-                self.settings.watch_folder = dialog.selected_watch_folder
-                self.start_watching()
-            self.theme.apply(self.settings.theme)
-            self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
-            self.info_panel.set_hour12(uses_12_hour(self.settings.time_format))
-            self._save_settings()
+        dialog.clear_removed_requested.connect(lambda: self.clear_removed_thumbnails(dialog))
+        dialog.clear_all_requested.connect(lambda: self.clear_all_thumbnails(dialog))
+        self._show_cache_info(dialog)
+        try:
+            if self._exec_dialog(dialog):
+                if dialog.selected_find_people != self.settings.find_people:
+                    self.settings.find_people = dialog.selected_find_people
+                    self.review_action.setEnabled(self.settings.find_people)
+                    self.new_group_action.setEnabled(self.settings.find_people)
+                    self.viewer.set_faces_available(self.settings.find_people)
+                    if self.settings.find_people:
+                        self.start_people()
+                    else:
+                        self.stop_people()
+                        self.people_pending = False
+                        if self.scope_kind in ("person", "group"):
+                            self.sidebar.select_scope("all", None, None)
+                        self.close_review()  # its answers would change people that are no longer shown
+                    self.reload_sidebar()
+                self.settings.theme = dialog.selected_theme
+                self.settings.time_format = dialog.selected_time_format
+                if dialog.selected_watch_folder != self.settings.watch_folder:
+                    self.settings.watch_folder = dialog.selected_watch_folder
+                    self.start_watching()
+                self.theme.apply(self.settings.theme)
+                self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
+                self.info_panel.set_hour12(uses_12_hour(self.settings.time_format))
+                self._save_settings()
+        finally:
+            dialog.deleteLater()  # its measurements may still arrive; they check it
+
+    def _announce_if_long(self, eta: Eta, title: str, message: str) -> None:
+        """For jobs long enough that you've likely looked away: a system notification, and if you've
+        switched to another app, a bounce of the Dock icon (a flash of the taskbar button on Windows)."""
+        if eta.elapsed() < ANNOUNCE_AFTER_SECONDS:
+            return
+        notify(title, message)
+        if not self.isActiveWindow():
+            QApplication.alert(self)
+
+    def _exec_dialog(self, dialog) -> bool:
+        """Run a modal dialog. Separate so tests can drive Settings."""
+        return bool(dialog.exec())
+
+    def _show_cache_info(self, dialog) -> None:
+        repository = self.repository
+
+        def measure():
+            return (*cache_size(media_module.THUMBNAIL_DIR), repository.removed_file_count())
+
+        def done(info):
+            try:
+                dialog.set_cache_info(*info)
+            except RuntimeError:
+                pass  # the dialog closed meanwhile
+
+        run_async(self.io_pool, measure, done, lambda error: LOGGER.error("Could not measure thumbnails", exc_info=error))
+
+    def _confirm(self, parent, title: str, text: str, detail: str, action: str) -> bool:
+        """Ask before a destructive action (Cancel is the default). Separate so tests can answer."""
+        dialog = QMessageBox(parent)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle(title)
+        dialog.setText(text)
+        dialog.setInformativeText(detail)
+        button = dialog.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        dialog.deleteLater()
+        return dialog.clickedButton() is button
+
+    def clear_removed_thumbnails(self, dialog=None) -> None:
+        """Stop keeping the thumbnails of folders removed from the library, and delete them."""
+        self.stop_warming()  # its own cleanup must not run at the same time
+        repository = self.repository
+        if dialog is not None:
+            dialog.set_cache_info(0, 0, 0, busy=True)
+
+        def run():
+            repository.forget_removed_files()
+            entries = repository.cache_entries()
+            # With no folder left, nothing is needed: everything goes.
+            return (prune_thumbnail_cache(media_module.THUMBNAIL_DIR, entries) if entries
+                    else clear_thumbnail_cache(media_module.THUMBNAIL_DIR))
+
+        def done(result):
+            self.status.setText(f"Freed {format_size(result.freed_bytes)}: thumbnails of removed folders deleted")
+            if dialog is not None:
+                self._show_cache_info(dialog)
+            if not self.scanning:  # a running scan starts warming when it ends
+                self.start_warming()
+
+        run_async(self.io_pool, run, done, lambda error: LOGGER.error("Could not free thumbnails", exc_info=error))
+
+    def clear_all_thumbnails(self, dialog=None) -> None:
+        """Delete every cached thumbnail (after asking); they are made again in the background."""
+        if not self._confirm(dialog or self, "Delete all thumbnails?", "Delete all cached thumbnails?",
+                             "Your photos and videos are not touched. Thumbnails are made again in the "
+                             "background, which can take a while for a large library; scrolling is slower "
+                             "until then.", "Delete Thumbnails"):
+            return
+        self.stop_warming()
+        self.warm_pending = True
+        repository = self.repository
+        if dialog is not None:
+            dialog.set_cache_info(0, 0, 0, busy=True)
+
+        def run():
+            repository.forget_removed_files()
+            return clear_thumbnail_cache(media_module.THUMBNAIL_DIR)
+
+        def done(result):
+            self.loader.reset()  # drops pixmaps and remembered failures; cells reload from new thumbnails
+            self.view.viewport().update()
+            self.sidebar.tree.viewport().update()
+            self.status.setText(f"Deleted all thumbnails ({format_size(result.freed_bytes)})  ·  making them again…")
+            if dialog is not None:
+                self._show_cache_info(dialog)
+            if not self.scanning:
+                self.start_warming()
+
+        run_async(self.io_pool, run, done, lambda error: LOGGER.error("Could not delete thumbnails", exc_info=error))
 
     def _error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)

@@ -615,3 +615,4 @@ class Sidebar(QFrame):
             menu.addSeparator()
         menu.addAction("Add Folder to Library…", self.add_folder_requested.emit)
         menu.exec(self.tree.viewport().mapToGlobal(position))
+        menu.deleteLater()

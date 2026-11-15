@@ -879,3 +879,147 @@ class ThumbnailRetryTests(WindowTestCase):
         loader.request(item, 96)
         self.wait_until(lambda: loader.has_exact(item, 96) or loader.is_unavailable(item), message="loaded")
         self.assertTrue(loader.has_exact(item, 96))
+
+
+class ThumbnailSettingsTests(WindowTestCase):
+    def test_settings_frees_removed_folders_and_deletes_every_thumbnail(self):
+        from photolibrary.core.cache_cleanup import cache_size
+        window = self.window
+        self.wait_until(lambda: not window.warm_pending, timeout=20, message="thumbnails ready")
+        before = cache_size(self.thumb_dir)[0]
+        self.assertGreater(before, 0)
+        with patch.object(window, "_confirm", return_value=False):
+            window.clear_all_thumbnails()  # Cancel: nothing happens
+        self.assertEqual(cache_size(self.thumb_dir)[0], before)
+        with patch.object(window, "_confirm", return_value=True):
+            window.clear_all_thumbnails()
+        self.wait_until(lambda: window.status.text().startswith("Deleted all thumbnails")
+                        or window.status.text().startswith("Preparing thumbnails")
+                        or not window.warm_pending, timeout=20, message="deleted")
+        # They are made again in the background.
+        self.wait_until(lambda: not window.warm_pending and cache_size(self.thumb_dir)[0] >= before, timeout=30,
+                        message="thumbnails made again")
+
+    def test_settings_shows_the_cache_and_its_buttons(self):
+        from photolibrary.ui.dialogs import PreferencesDialog
+        window = self.window
+        seen = {}
+
+        def answer(dialog):
+            self.wait_until(lambda: "measuring" not in dialog.cache_label.text(), message="measured")
+            seen["text"] = dialog.cache_label.text()
+            seen["removed"] = dialog.clear_removed_button.isEnabled()
+            seen["all"] = dialog.clear_all_button.isEnabled()
+            return False
+
+        with patch.object(window, "_exec_dialog", answer):
+            window.show_preferences()
+        self.assertTrue(seen["text"].startswith("Thumbnails: "))
+        self.assertEqual((seen["removed"], seen["all"]), (False, True))  # no removed folders here
+
+
+class TimeLeftTests(WindowTestCase):
+    def setUp(self):
+        super().setUp()
+        self.clock = [1000.0]
+        from types import SimpleNamespace
+
+        from photolibrary.core import progress
+        # Only the estimates' clock: the test helpers' own waits still need the real one.
+        clock = patch.object(progress, "time", SimpleNamespace(monotonic=lambda: self.clock[0]))
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def test_thumbnails_show_time_left_and_announce_a_long_run(self):
+        window = self.window
+        window.warm_id += 1000  # the window's own warming events are ignored from here on
+        warm = window.warm_id
+
+        def progress(done):
+            window._handle_warm_event({"type": "progress", "id": warm, "done": done, "total": 10_000})
+
+        progress(0)
+        self.assertIn("estimating time left…", window.status.text())
+        for second in range(1, 11):
+            self.clock[0] += 1
+            progress(second * 100)
+        self.assertIn("about 2 min left", window.status.text())  # 9,000 left at 100 a second: 90 s, rounded
+        self.clock[0] += 120
+        from photolibrary.core.thumbnail_warmer import WarmResult
+        with patch("photolibrary.ui.main_window.notify") as notify:
+            window._handle_warm_event({"type": "done", "id": warm, "result": WarmResult(10_000, 10_000, 10_000, 0, False),
+                                       "pruned": None})
+        self.assertIn("all thumbnails ready (in 2 min)", window.status.text())
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args[0][0], "Thumbnails ready")
+
+    def test_indexing_shows_time_left_per_folder(self):
+        window = self.window
+        scan = window.active_scan_id
+        window._handle_index_event({"type": "scan_started", "scan_id": scan})
+        for second in range(0, 11):
+            window._handle_index_event({"type": "scan_progress", "scan_id": scan, "processed": second * 50,
+                                        "total": 2_000, "updated": second * 50, "unchanged": 0, "errors": 0})
+            self.clock[0] += 1
+        self.assertIn("about 30 s left", window.status.text())  # 1,500 left at 50 a second
+
+
+class CleanupAndReturnTests(WindowTestCase):
+    def test_menus_and_message_boxes_are_deleted_after_use(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication, QMenu
+        window = self.window
+        window.view.selectAll()
+        point = window.view.visualRect(window.model.index(0, 0)).center()
+        menus = len(window.findChildren(QMenu))  # the menu bar's own menus stay
+        with patch.object(window, "_exec_menu", lambda menu, position: None):
+            for _ in range(3):
+                window._grid_context_menu(point)
+        with patch.object(QMessageBox, "exec", lambda dialog: 0):
+            window.move_to_trash()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertEqual(len(window.findChildren(QMenu)), menus)
+        self.assertEqual(window.findChildren(QMessageBox), [])
+
+    def test_back_from_the_viewer_shows_the_photo_after_the_order_changed(self):
+        window = self.window
+        window.zoom_slider.setValue(320)  # big cells, so the grid scrolls
+        self.settle()
+        window.view.verticalScrollBar().setValue(0)
+        item = window.model.item_at(0)
+        window.open_viewer(0)
+        window.set_sort_order("oldest")  # the photo moves to the end of the grid
+        self.wait_until(lambda: window.model.row_for_item_id(item.id) == len(window.model.items) - 1, message="re-sorted")
+        window.close_viewer()
+        self.settle()
+        rect = window.view.visualRect(window.model.index(window.model.row_for_item_id(item.id), 0))
+        self.assertTrue(window.view.viewport().rect().intersects(rect), "the photo just viewed should be on screen")
+
+    def test_a_new_photo_in_the_viewer_has_no_hand_cursor_left_over(self):
+        from PySide6.QtGui import QPixmap
+        canvas = self.window.viewer.canvas
+        canvas.resize(800, 600)
+        canvas.set_content(QPixmap(400, 300), (4000, 3000))
+        canvas.toggle_actual_size()  # zoomed in: the open hand shows
+        self.assertTrue(canvas.testAttribute(Qt.WidgetAttribute.WA_SetCursor))
+        canvas.set_content(QPixmap(400, 300), (4000, 3000))
+        self.assertFalse(canvas.testAttribute(Qt.WidgetAttribute.WA_SetCursor))
+
+    def test_turning_people_off_leaves_review(self):
+        window = self.window
+        window.settings.find_people = True
+        window.show_review()
+        self.assertTrue(window.review_active)
+
+        def turn_off(dialog):
+            dialog.find_people.setChecked(False)
+            return True
+
+        with patch.object(window, "_exec_dialog", turn_off):
+            window.show_preferences()
+        self.assertFalse(window.review_active)
+
+    def test_review_says_suggestions_are_for_named_people(self):
+        window = self.window
+        window.review.set_suggestions([], {})
+        self.assertIn("Name people", window.review.empty.message_label.text())

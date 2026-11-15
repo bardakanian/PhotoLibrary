@@ -1,13 +1,18 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QVBoxLayout,
 )
 
+from ..core.formatting import format_size
 from .time_format import system_uses_12_hour
 
 
 class PreferencesDialog(QDialog):
+    # Acted on at once (not on Save): the window does the work and reports in the status bar.
+    clear_removed_requested = Signal()
+    clear_all_requested = Signal()
+
     def __init__(self, current_theme: str, current_time_format: str = "system", watch_folder: bool = True,
                  parent=None, *, find_people: bool = False, faces_available: bool = True):
         super().__init__(parent)
@@ -55,6 +60,31 @@ class PreferencesDialog(QDialog):
         people_note.setProperty("muted", True)
         people_note.setWordWrap(True)
         layout.addWidget(people_note)
+        storage_heading = QLabel("Storage")
+        storage_heading.setProperty("role", "section")
+        layout.addWidget(storage_heading)
+        self.cache_label = QLabel("Thumbnails: measuring…")
+        self.cache_label.setWordWrap(True)
+        layout.addWidget(self.cache_label)
+        cache_buttons = QHBoxLayout()
+        self.clear_removed_button = QPushButton("Free Space from Removed Folders")
+        self.clear_removed_button.setToolTip(
+            "Delete the thumbnails kept for folders you removed from the library. If you add such a "
+            "folder back, its thumbnails are made again.")
+        self.clear_removed_button.setEnabled(False)
+        self.clear_removed_button.clicked.connect(self.clear_removed_requested)
+        self.clear_all_button = QPushButton("Delete All Thumbnails…")
+        self.clear_all_button.setToolTip("Delete every cached thumbnail. They are made again in the background.")
+        self.clear_all_button.clicked.connect(self.clear_all_requested)
+        cache_buttons.addWidget(self.clear_removed_button)
+        cache_buttons.addWidget(self.clear_all_button)
+        cache_buttons.addStretch(1)
+        layout.addLayout(cache_buttons)
+        cache_note = QLabel("Thumbnails of a folder you remove from the library are kept, so adding it "
+                            "back is quick. Your photos are never touched.")
+        cache_note.setProperty("muted", True)
+        cache_note.setWordWrap(True)
+        layout.addWidget(cache_note)
         note = QLabel("System follows your macOS appearance and clock settings.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
@@ -63,6 +93,15 @@ class PreferencesDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def set_cache_info(self, files: int, size: int, removed_files: int, busy: bool = False) -> None:
+        """Show the thumbnail cache's size and how many removed-folder files it still keeps."""
+        text = f"Thumbnails: {format_size(size)} ({files:,} files)"
+        if removed_files:
+            text += f", including those of {removed_files:,} files in removed folders"
+        self.cache_label.setText(text if not busy else "Thumbnails: working…")
+        self.clear_removed_button.setEnabled(bool(removed_files) and not busy)
+        self.clear_all_button.setEnabled(bool(files) and not busy)
 
     @property
     def selected_theme(self) -> str:

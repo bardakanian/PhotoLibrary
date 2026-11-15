@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 
 from photolibrary.core import media
-from photolibrary.core.cache_cleanup import STALE_PART_SECONDS, prune_thumbnail_cache
+from photolibrary.core.cache_cleanup import STALE_PART_SECONDS, cache_size, clear_thumbnail_cache, prune_thumbnail_cache
 from photolibrary.core.constants import COVER_EDGE
 
 from .base import TempAppTestCase
@@ -80,3 +80,11 @@ class CacheCleanupTests(TempAppTestCase):
         others = [path for path in bucket.iterdir() if path != self.orphan]
         prune_thumbnail_cache(self.thumb_dir, [self.keep_entry])
         self.assertEqual(bucket.exists(), bool(others))
+
+    def test_clearing_deletes_every_thumbnail(self):
+        files, size = cache_size(self.thumb_dir)
+        self.assertEqual(files, 3)
+        result = clear_thumbnail_cache(self.thumb_dir)
+        self.assertEqual((result.removed, result.freed_bytes), (3, size))
+        self.assertEqual(cache_size(self.thumb_dir), (0, 0))
+        self.assertEqual(clear_thumbnail_cache(self.root / "missing"), result.__class__(0, 0, 0))

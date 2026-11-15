@@ -128,7 +128,8 @@ class ReviewPage(QWidget):
             title = "All caught up" if self.answers or self.suggestions else "No suggestions right now"
             message = ("Every face that looks like someone has been reviewed."
                        if self.suggestions else
-                       "Faces appear here when they look like a person but weren't grouped with them.")
+                       "Faces that look like someone you've named, but weren't grouped with them, appear "
+                       "here. Name people in the sidebar to get suggestions for them.")
             self.empty.set_content(title, message, "Back to Library")
             self.stack.setCurrentIndex(0)
             return

@@ -83,3 +83,42 @@ def prune_thumbnail_cache(thumbnail_dir: Path, entries: Iterable[tuple[str, int,
         except OSError:
             pass
     return PruneResult(kept, removed, freed)
+
+
+def clear_thumbnail_cache(thumbnail_dir: Path) -> PruneResult:
+    """Delete every cached thumbnail (and failure marker). They are made again as they are needed."""
+    removed = freed = 0
+    if not thumbnail_dir.is_dir():
+        return PruneResult(0, 0, 0)
+    for bucket in thumbnail_dir.iterdir():
+        if not bucket.is_dir():
+            continue
+        for cached in bucket.iterdir():
+            try:
+                size = cached.stat().st_size
+                cached.unlink()
+            except OSError:
+                continue
+            removed += 1
+            freed += size
+        try:
+            bucket.rmdir()
+        except OSError:
+            pass
+    return PruneResult(0, removed, freed)
+
+
+def cache_size(thumbnail_dir: Path) -> tuple[int, int]:
+    """(files, bytes) in the thumbnail cache."""
+    files = total = 0
+    if not thumbnail_dir.is_dir():
+        return 0, 0
+    for bucket in thumbnail_dir.iterdir():
+        if bucket.is_dir():
+            for cached in bucket.iterdir():
+                try:
+                    total += cached.stat().st_size
+                    files += 1
+                except OSError:
+                    pass
+    return files, total

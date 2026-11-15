@@ -114,6 +114,25 @@ class MultiFolderLibraryTests(TempAppTestCase):
         self.assertEqual(self.names([self.home, self.drive]), ["h2.jpg", "h1.jpg"])
         self.assertTrue((self.drive / "Trips" / "d1.jpg").exists())  # files are never touched
 
+    def test_a_removed_folders_thumbnails_are_kept_until_it_comes_back(self):
+        from photolibrary.core import media
+        from photolibrary.core.cache_cleanup import prune_thumbnail_cache
+        item = next(item for item in self.repo.query(self.drive) if item.name == "d1.jpg")
+        thumbnail = media.get_cached_thumbnail(item.path, "image", item.file_size, item.modified_ns)
+        self.repo.remove_folder(self.drive)
+        self.assertEqual(self.repo.removed_file_count(), 2)
+        prune_thumbnail_cache(self.thumb_dir, self.repo.cache_entries())
+        self.assertTrue(thumbnail.exists())  # kept for when the folder is added back
+        scan([self.home, self.drive])  # added back: its index lists the thumbnails again
+        self.assertEqual(self.repo.removed_file_count(), 0)
+        prune_thumbnail_cache(self.thumb_dir, self.repo.cache_entries())
+        self.assertTrue(thumbnail.exists())
+        # Removed again, then the space is freed from Settings: the thumbnail goes.
+        self.repo.remove_folder(self.drive)
+        self.assertEqual(self.repo.forget_removed_files(), 2)
+        prune_thumbnail_cache(self.thumb_dir, self.repo.cache_entries())
+        self.assertFalse(thumbnail.exists())
+
     def test_trash_works_in_every_folder_and_refuses_outside(self):
         items = {item.name: item for item in self.repo.query([self.home, self.drive])}
         moved = []

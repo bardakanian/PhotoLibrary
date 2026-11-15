@@ -5,6 +5,40 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.19.1 — 2026-11-15
+
+Seven bug fixes:
+
+- **Memory:** every right-click menu, confirmation and Settings or group window stayed in memory
+  after it closed. A right-click on a large selection kept that whole selection alive each time.
+- **Back from the viewer** shows the photo you were on even when the grid changed meanwhile (a
+  new sort order, photos added above it) or you moved to another photo: the sidebar coming back
+  used to re-flow the grid after the scroll and push the photo off screen.
+- **people.json** is written by one thread at a time. Quick Review answers wrote it from two
+  threads at once, which could leave a mix of both (the backup of your names).
+- Turning People off in Settings while Review is open goes back to the library.
+- Review's empty page says suggestions are for people you've named.
+- Freeing or deleting thumbnails during a scan no longer starts making thumbnails in the middle of
+  the scan (the scan starts it when it ends).
+- A new photo in the viewer no longer keeps the hand cursor of a zoomed-in previous one.
+
+## 1.19.0 — 2026-11-15
+
+- **Time left** for long jobs, as in On This Day: indexing, preparing thumbnails and finding
+  people show "about 3 min left" in the status bar. The estimate blends the pace of the last
+  minute with the pace since the start, so it counts down steadily instead of jumping with every
+  slow HEIC or fast cached file. When a job finishes, the status says how long it took.
+- A job that ran over a minute posts a notification when it finishes ("Thumbnails ready",
+  "People updated", "Library updated"), and bounces the Dock icon if you're in another app.
+
+## 1.18.0 — 2026-11-15
+
+- **Removing a folder keeps its thumbnails.** Adding the folder back (say, a backup drive) reuses
+  them instead of making them all again. They used to be deleted by the next cleanup.
+- **Settings ▸ Storage** shows how much space thumbnails use, with **Free Space from Removed
+  Folders** (deletes the thumbnails kept for removed folders) and **Delete All Thumbnails…**
+  (asks first; they are made again in the background). Your photos are never touched.
+
 ## 1.17.0 — 2026-11-10
 
 - **Review Suggestions** only asks about people you have named ("Is this Ana?"). Faces that look

@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import os
 import sqlite3
 import threading
 from dataclasses import replace
@@ -32,6 +33,8 @@ def ensure_app_dirs() -> None:
 
 
 _schema_lock = threading.Lock()
+# People changes commit on several threads (Review answers, regrouping); each rewrites people.json.
+_backup_lock = threading.Lock()
 _initialized: set[str] = set()
 
 
@@ -144,6 +147,17 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (face_id, person_id)
         )
     """)
+    # Files of folders removed from the library, so their thumbnails are kept for when the folder
+    # comes back (cleared when it is scanned again, or from Settings).
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS removed_files (
+            folder_root TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            modified_ns INTEGER NOT NULL
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_removed_files_root ON removed_files (folder_root)")
     connection.execute("""
         CREATE TRIGGER IF NOT EXISTS faces_deleted_rejections AFTER DELETE ON faces BEGIN
             DELETE FROM face_rejections WHERE face_id = OLD.id;
@@ -320,10 +334,36 @@ class MediaRepository:
             connection.close()
 
     def cache_entries(self) -> list[tuple[str, int, int]]:
-        """(file_path, file_size, modified_ns) for every indexed file in every folder."""
+        """(file_path, file_size, modified_ns) of every file whose thumbnails are kept: every indexed
+        file, plus the files of folders removed from the library (see `remove_folder`)."""
         connection = open_database()
         try:
-            return connection.execute("SELECT file_path, file_size, modified_ns FROM media").fetchall()
+            return connection.execute("""
+                SELECT file_path, file_size, modified_ns FROM media
+                UNION SELECT file_path, file_size, modified_ns FROM removed_files
+            """).fetchall()
+        finally:
+            connection.close()
+
+    def removed_file_count(self) -> int:
+        """How many files of removed folders still have their thumbnails kept."""
+        connection = open_database()
+        try:
+            return connection.execute("SELECT COUNT(*) FROM removed_files").fetchone()[0]
+        finally:
+            connection.close()
+
+    def forget_removed_files(self, folder: Path | None = None) -> int:
+        """Stop keeping thumbnails for removed folders (one folder, or all). Returns how many files."""
+        connection = open_database()
+        try:
+            if folder is None:
+                count = connection.execute("DELETE FROM removed_files").rowcount
+            else:
+                count = connection.execute("DELETE FROM removed_files WHERE folder_root = ?",
+                                           (normalize_roots(folder)[0],)).rowcount
+            connection.commit()
+            return count
         finally:
             connection.close()
 
@@ -557,7 +597,15 @@ class MediaRepository:
             connection.execute("UPDATE people SET reference = ? WHERE id = ?", (centre.tobytes(), person))
 
     def write_people_backup(self) -> None:
-        """Write named and hidden people (with reference faces) to people.json, beside the database."""
+        """Write named and hidden people (with reference faces) to people.json, beside the database.
+
+        One writer at a time: two threads writing the same temporary file could leave a mix of
+        both. Reading inside the lock means the last write always holds the newest state.
+        """
+        with _backup_lock:
+            self._write_people_backup()
+
+    def _write_people_backup(self) -> None:
         connection = open_database()
         try:
             rows = connection.execute(
@@ -580,7 +628,7 @@ class MediaRepository:
             for name, hidden, reference in rows], "groups": groups}
         target = APP_DIR / PEOPLE_BACKUP
         try:
-            temporary = target.with_suffix(".tmp")
+            temporary = target.with_name(f"{target.stem}.{os.getpid()}.tmp")
             temporary.write_text(json.dumps(backup, indent=1), encoding="utf-8")
             temporary.replace(target)
         except OSError:
@@ -909,11 +957,19 @@ class MediaRepository:
                     loose_vectors, centroids, person_ids, [rejected.get(row[0], set()) for row in loose])]
 
     def remove_folder(self, folder: Path) -> int:
-        """Forget a library folder's index (its files are not touched). Returns how many rows went away."""
+        """Forget a library folder's index (its files are not touched). Returns how many rows went away.
+
+        Its thumbnails are kept (listed in `removed_files`), so adding the folder back reuses them.
+        """
+        root = normalize_roots(folder)[0]
         connection = open_database()
         try:
-            removed = connection.execute("DELETE FROM media WHERE folder_root = ?",
-                                         (normalize_roots(folder)[0],)).rowcount
+            connection.execute("DELETE FROM removed_files WHERE folder_root = ?", (root,))
+            connection.execute("""
+                INSERT INTO removed_files (folder_root, file_path, file_size, modified_ns)
+                SELECT folder_root, file_path, file_size, modified_ns FROM media WHERE folder_root = ?
+            """, (root,))
+            removed = connection.execute("DELETE FROM media WHERE folder_root = ?", (root,)).rowcount
             connection.commit()
             return removed
         finally:
