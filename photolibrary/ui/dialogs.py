@@ -14,7 +14,8 @@ class PreferencesDialog(QDialog):
     clear_all_requested = Signal()
 
     def __init__(self, current_theme: str, current_time_format: str = "system", watch_folder: bool = True,
-                 parent=None, *, find_people: bool = False, faces_available: bool = True):
+                 parent=None, *, find_people: bool = False, faces_available: bool = True,
+                 thumbnail_quality: str = "standard"):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -63,6 +64,17 @@ class PreferencesDialog(QDialog):
         storage_heading = QLabel("Storage")
         storage_heading.setProperty("role", "section")
         layout.addWidget(storage_heading)
+        quality_form = QFormLayout()
+        self.thumbnail_quality = QComboBox()
+        self.thumbnail_quality.addItem("Standard", "standard")
+        self.thumbnail_quality.addItem("High (sharper in large grid sizes)", "high")
+        self.thumbnail_quality.setCurrentIndex(max(0, self.thumbnail_quality.findData(thumbnail_quality)))
+        self.thumbnail_quality.setAccessibleName("Thumbnail quality")
+        self.thumbnail_quality.setToolTip(
+            "High makes grid thumbnails twice as large (1,024 px): sharp at the biggest thumbnail sizes, "
+            "using about 3–4 times the disk space. Changing it remakes every thumbnail in the background.")
+        quality_form.addRow("Thumbnail quality", self.thumbnail_quality)
+        layout.addLayout(quality_form)
         self.cache_label = QLabel("Thumbnails: measuring…")
         self.cache_label.setWordWrap(True)
         layout.addWidget(self.cache_label)
@@ -93,6 +105,8 @@ class PreferencesDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        # Qt opens a dialog at most two-thirds of the screen tall, which squashed these rows together.
+        self.setMinimumHeight(self.sizeHint().height())
 
     def set_cache_info(self, files: int, size: int, removed_files: int, busy: bool = False) -> None:
         """Show the thumbnail cache's size and how many removed-folder files it still keeps."""
@@ -102,6 +116,10 @@ class PreferencesDialog(QDialog):
         self.cache_label.setText(text if not busy else "Thumbnails: working…")
         self.clear_removed_button.setEnabled(bool(removed_files) and not busy)
         self.clear_all_button.setEnabled(bool(files) and not busy)
+
+    @property
+    def selected_thumbnail_quality(self) -> str:
+        return self.thumbnail_quality.currentData()
 
     @property
     def selected_theme(self) -> str:

@@ -5,6 +5,15 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.20.0 — 2026-11-15
+
+- **Settings ▸ Thumbnail quality:** **High** makes grid thumbnails twice as large (1,024 px), so
+  they stay sharp at the biggest thumbnail sizes, for about 3–4 times the disk space. Switching
+  remakes every thumbnail in the background (with time left); meanwhile each cell shows the old
+  one, never a blank, and the old size is deleted once the new one is done. **Standard** (512 px)
+  stays the default; switching back frees the space.
+- The Settings window always opens tall enough for every option (Qt squashed it on small screens).
+
 ## 1.19.1 — 2026-11-15
 
 Seven bug fixes:

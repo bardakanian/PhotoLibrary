@@ -206,6 +206,10 @@ Open **Settings** with ⌘, or the ⚙ button at the right end of the toolbar (a
   clock (13:30). It applies wherever a capture time is shown, such as the viewer header.
 - **Update automatically when files change** (on by default): turn off to rely on
   Rescan (⌘R) instead.
+- **Thumbnail quality**: **Standard** (512 px grid thumbnails, the default) or **High** (1,024 px,
+  sharp at the biggest thumbnail sizes, about 3–4 times the disk space). Switching remakes every
+  thumbnail in the background; until then each cell shows the old one, and the old size is
+  deleted once the new one is done.
 - **Storage**: how much space thumbnails use. **Free Space from Removed Folders** deletes the
   thumbnails kept for folders you removed from the library; **Delete All Thumbnails…** (asks
   first) deletes every thumbnail, and they are made again in the background. Photos are never
@@ -341,7 +345,8 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 - **The grid** (`ui/grid_view.py`) is a custom `QAbstractItemView`. Its geometry comes
   from `core/grid_layout.py`, which works on month sections, not individual items. Lookups
   are binary searches, so painting and hit-testing only touch the cells on screen.
-- **Thumbnails** are created once and cached on disk (512 px, aspect kept). Creating
+- **Thumbnails** are created once and cached on disk (512 px, or 1,024 px with Thumbnail quality
+  High; aspect kept). Creating
   one means decoding the original: about 50 ms for a 12 MP JPEG and about 450 ms for a HEIC.
   Reading a cached one takes about 1 ms.
   - **Prepared in advance.** After each scan, `core/thumbnail_warmer.py` creates every
@@ -433,7 +438,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 270 tests (about a minute and a half). It includes headless UI tests that drive
+The suite has 275 tests (about a minute and a half). It includes headless UI tests that drive
 the real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 People, groups and Review, folder watching, theme changes, the freeze monitor and pausing
 thumbnail work during playback) on a generated library. People tests use a fake face engine,

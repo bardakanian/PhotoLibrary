@@ -38,7 +38,7 @@ from .pages.review_page import ReviewPage
 from .pages.viewer_page import ViewerPage
 from .tasks import cancel_queued, run_async
 from .theme import ThemeManager
-from .thumbnails import ThumbnailLoader
+from .thumbnails import ThumbnailLoader, grid_edge, set_high_quality
 from .time_format import uses_12_hour
 from .widgets import SearchBox
 from .notifications import notify
@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
         self.settings_timer.setInterval(600)
         self.settings_timer.timeout.connect(self._save_settings)
 
+        set_high_quality(self.settings.thumbnail_quality == "high")
         self.loader = ThumbnailLoader(self)
         self.model = GridModel(self)
         self.model.mode = self.settings.view_mode
@@ -1290,13 +1291,14 @@ class MainWindow(QMainWindow):
         stop = self.warm_stop = threading.Event()
         repository = self.repository
         emit = self.warm_events.received.emit
+        edge = grid_edge()  # Settings ▸ Thumbnail quality, read on this thread
 
         def run():
             try:
                 items = repository.query(folders)
                 result = warm_thumbnails(
                     items, stop, lambda done, total: emit({"type": "progress", "id": warm_id, "done": done,
-                                                           "total": total}))
+                                                           "total": total}), edge=edge)
                 if not stop.is_set():
                     # Then the large covers for the Years and Months tiles (one per year and month).
                     snapshot = build_snapshot(items)
@@ -1306,8 +1308,9 @@ class MainWindow(QMainWindow):
                 # Finally drop thumbnails of files that were deleted, edited or moved.
                 pruned = None
                 if not stop.is_set():
+                    # Every thumbnail of the current quality exists by now, so the other size can go.
                     pruned = prune_thumbnail_cache(media_module.THUMBNAIL_DIR, repository.cache_entries(),
-                                                   stop_event=stop)
+                                                   stop_event=stop, grid_edge=edge)
                     if pruned.removed:
                         LOGGER.info("Removed %d stale thumbnails (%d bytes)", pruned.removed, pruned.freed_bytes)
                 if stop.is_set():
@@ -1954,7 +1957,8 @@ class MainWindow(QMainWindow):
 
     def show_preferences(self) -> None:
         dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self,
-                                   find_people=self.settings.find_people, faces_available=FACES_ENABLED)
+                                   find_people=self.settings.find_people, faces_available=FACES_ENABLED,
+                                   thumbnail_quality=self.settings.thumbnail_quality)
         dialog.clear_removed_requested.connect(lambda: self.clear_removed_thumbnails(dialog))
         dialog.clear_all_requested.connect(lambda: self.clear_all_thumbnails(dialog))
         self._show_cache_info(dialog)
@@ -1979,12 +1983,29 @@ class MainWindow(QMainWindow):
                 if dialog.selected_watch_folder != self.settings.watch_folder:
                     self.settings.watch_folder = dialog.selected_watch_folder
                     self.start_watching()
+                if dialog.selected_thumbnail_quality != self.settings.thumbnail_quality:
+                    self.set_thumbnail_quality(dialog.selected_thumbnail_quality)
                 self.theme.apply(self.settings.theme)
                 self.viewer.set_hour12(uses_12_hour(self.settings.time_format))
                 self.info_panel.set_hour12(uses_12_hour(self.settings.time_format))
                 self._save_settings()
         finally:
             dialog.deleteLater()  # its measurements may still arrive; they check it
+
+    def set_thumbnail_quality(self, quality: str) -> None:
+        """Standard (512 px) or High (1,024 px) grid thumbnails. The new size is made in the background;
+        until then each cell shows the old one, and the old size is deleted once the new one is done."""
+        self.settings.thumbnail_quality = quality
+        set_high_quality(quality == "high")
+        self.loader.reset()
+        self.view.viewport().update()
+        self.sidebar.tree.viewport().update()
+        self.stop_warming()
+        self.warm_pending = True
+        self.status.setText("Making sharper thumbnails in the background…" if quality == "high" else
+                            "Making standard thumbnails in the background; the larger ones are then deleted…")
+        if not self.scanning:  # a running scan starts warming when it ends
+            self.start_warming()
 
     def _announce_if_long(self, eta: Eta, title: str, message: str) -> None:
         """For jobs long enough that you've likely looked away: a system notification, and if you've
@@ -2030,7 +2051,7 @@ class MainWindow(QMainWindow):
     def clear_removed_thumbnails(self, dialog=None) -> None:
         """Stop keeping the thumbnails of folders removed from the library, and delete them."""
         self.stop_warming()  # its own cleanup must not run at the same time
-        repository = self.repository
+        repository, edge = self.repository, grid_edge()
         if dialog is not None:
             dialog.set_cache_info(0, 0, 0, busy=True)
 
@@ -2038,7 +2059,7 @@ class MainWindow(QMainWindow):
             repository.forget_removed_files()
             entries = repository.cache_entries()
             # With no folder left, nothing is needed: everything goes.
-            return (prune_thumbnail_cache(media_module.THUMBNAIL_DIR, entries) if entries
+            return (prune_thumbnail_cache(media_module.THUMBNAIL_DIR, entries, grid_edge=edge) if entries
                     else clear_thumbnail_cache(media_module.THUMBNAIL_DIR))
 
         def done(result):

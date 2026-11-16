@@ -4,7 +4,7 @@ from pathlib import Path
 APP_NAME = "Photo Library"
 # The one place the version lives. Bump it with every change (minor: features, patch: fixes)
 # and add a matching entry to CHANGELOG.md.
-VERSION = "1.19.1"
+VERSION = "1.20.0"
 # PHOTO_LIBRARY_HOME points the app at a separate data folder (demos, smoke tests).
 APP_DIR = Path(os.environ.get("PHOTO_LIBRARY_HOME") or Path.home() / ".photo_library").expanduser()
 CONFIG_FILE = APP_DIR / "config.json"
@@ -23,6 +23,9 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 # Longest side of a cached thumbnail. Aspect ratio is kept (no padding) so the grid can
 # crop to square cells; 512 px stays sharp for a 256-point cell on a Retina display.
 THUMBNAIL_EDGE = 512
+# Settings ▸ Thumbnail quality ▸ High: grid thumbnails this large stay sharp in the biggest cells
+# (about 640 px on a Retina screen), at about 3-4 times the disk space.
+HIGH_THUMBNAIL_EDGE = 1024
 # Larger thumbnails used only as Years/Months tile covers (a few hundred per library), which
 # are drawn up to about 1,000 device pixels wide.
 COVER_EDGE = 1600

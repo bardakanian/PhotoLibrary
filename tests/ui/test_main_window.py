@@ -1023,3 +1023,62 @@ class CleanupAndReturnTests(WindowTestCase):
         window = self.window
         window.review.set_suggestions([], {})
         self.assertIn("Name people", window.review.empty.message_label.text())
+
+
+class ThumbnailQualityTests(WindowTestCase):
+    def build_extra_library(self):
+        # Large enough that the two qualities differ (the standard test photos are tiny).
+        self.write_photo(self.library / "BIG.jpg", datetime(2026, 3, 1, 12), size=(2400, 1800))
+        self.expected_total += 1
+
+    def tearDown(self):
+        from photolibrary.ui import thumbnails
+        thumbnails.set_high_quality(False)  # module state: don't leak High into later tests
+        super().tearDown()
+
+    def test_buckets_and_files_follow_the_quality(self):
+        from photolibrary.core.constants import COVER_EDGE, HIGH_THUMBNAIL_EDGE, THUMBNAIL_EDGE
+        from photolibrary.ui import thumbnails
+        self.assertEqual(thumbnails.bucket_for(640), 512)  # Standard tops out at 512
+        thumbnails.set_high_quality(True)
+        self.assertEqual(thumbnails.bucket_for(640), 640)
+        self.assertEqual(thumbnails.edge_for_bucket(640), HIGH_THUMBNAIL_EDGE)
+        self.assertEqual(thumbnails.edge_for_bucket(1024), COVER_EDGE)  # Years/Months covers stay as they are
+        thumbnails.set_high_quality(False)
+        self.assertEqual(thumbnails.edge_for_bucket(512), THUMBNAIL_EDGE)
+
+    def test_switching_to_high_rebuilds_and_frees_the_standard_size(self):
+        from photolibrary.core.constants import HIGH_THUMBNAIL_EDGE
+        from photolibrary.ui import thumbnails
+        window = self.window
+        self.wait_until(lambda: not window.warm_pending, timeout=20, message="standard thumbnails ready")
+        big = next(item for item in window.model.items if item.name == "BIG.jpg")
+        standard = media.thumbnail_cache_path(big.path, big.file_size, big.modified_ns)
+        high = media.thumbnail_cache_path(big.path, big.file_size, big.modified_ns, HIGH_THUMBNAIL_EDGE)
+        self.assertTrue(standard.exists())
+        with patch.object(window.loader._generate_queue, "submit", lambda key, job: False):
+            # With nothing made yet, a cell shows the standard thumbnail rather than going blank.
+            thumbnails.set_high_quality(True)
+            window.loader.reset()
+            window.loader.request(big, 640)
+            self.wait_until(lambda: window.loader.pixmap(big, 640) is not None, message="stand-in shown")
+            self.assertFalse(window.loader.has_exact(big, 640))  # still asks for the sharp one
+        thumbnails.set_high_quality(False)
+        window.set_thumbnail_quality("high")
+        self.assertEqual(window.settings.thumbnail_quality, "high")
+        self.wait_until(lambda: not window.warm_pending and high.exists(), timeout=30, message="high thumbnails made")
+        self.wait_until(lambda: not standard.exists(), timeout=10, message="standard size freed")
+        window.loader.request(big, 640)
+        self.wait_until(lambda: window.loader.has_exact(big, 640), message="sharp thumbnail loaded")
+        self.assertEqual(window.loader.pixmap(big, 640).height(), 640)
+
+    def test_settings_switches_the_quality(self):
+        window = self.window
+
+        def choose_high(dialog):
+            dialog.thumbnail_quality.setCurrentIndex(dialog.thumbnail_quality.findData("high"))
+            return True
+
+        with patch.object(window, "_exec_dialog", choose_high), patch.object(window, "set_thumbnail_quality") as switch:
+            window.show_preferences()
+        switch.assert_called_once_with("high")

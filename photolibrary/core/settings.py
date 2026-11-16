@@ -9,6 +9,7 @@ from .constants import APP_DIR, CONFIG_FILE
 VIEW_MODES = ("years", "months", "all")
 TIME_FORMATS = ("system", "12", "24")
 SORT_ORDERS = ("newest", "oldest")
+THUMBNAIL_QUALITIES = ("standard", "high")
 SIDEBAR_SECTIONS = ("library", "folders", "people", "unnamed", "groups", "albums", "hidden", "hidden_people")
 MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 80, 320, 160
 
@@ -32,6 +33,8 @@ class AppSettings:
     collapsed_sections: list[str] = field(default_factory=list)
     # Find faces and group them into People (core/faces.py). Off until the user turns it on.
     find_people: bool = False
+    # Grid thumbnails at 512 px ("standard") or 1,024 px ("high": sharp in big cells, more disk).
+    thumbnail_quality: str = "standard"
 
 
 def _hidden_albums(value) -> list[tuple[str, str]]:
@@ -114,6 +117,8 @@ class SettingsStore:
             hidden_albums=_hidden_albums(data.get("hidden_albums")),
             collapsed_sections=_collapsed_sections(data.get("collapsed_sections")),
             find_people=bool(data.get("find_people", False)),
+            thumbnail_quality=(data.get("thumbnail_quality") if data.get("thumbnail_quality") in THUMBNAIL_QUALITIES
+                               else "standard"),
         )
 
     def save(self, settings: AppSettings, ticket: int | None = None) -> bool:
@@ -152,6 +157,7 @@ class SettingsStore:
             "hidden_albums": [list(pair) for pair in settings.hidden_albums],
             "collapsed_sections": list(settings.collapsed_sections),
             "find_people": settings.find_people,
+            "thumbnail_quality": settings.thumbnail_quality,
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.
         temp = CONFIG_FILE.with_suffix(".tmp")

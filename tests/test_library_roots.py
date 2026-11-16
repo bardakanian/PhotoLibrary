@@ -164,6 +164,16 @@ class MultiFolderSettingsTests(TempAppTestCase):
         # A missing folder (say, an unplugged drive) is remembered, not dropped.
         self.assertEqual(store.load().library_folders, [first, second])
 
+    def test_thumbnail_quality_round_trips_and_bad_values_fall_back(self):
+        store = SettingsStore()
+        settings = store.load()
+        self.assertEqual(settings.thumbnail_quality, "standard")
+        settings.thumbnail_quality = "high"
+        store.save(settings)
+        self.assertEqual(store.load().thumbnail_quality, "high")
+        self.config_file.write_text(json.dumps({"thumbnail_quality": "ultra"}))
+        self.assertEqual(store.load().thumbnail_quality, "standard")
+
     def test_bad_folder_entries_are_ignored(self):
         self.app_dir.mkdir(parents=True, exist_ok=True)
         folder = self.make_library("A")

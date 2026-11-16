@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from .constants import COVER_EDGE, THUMBNAIL_DIR, THUMBNAIL_EDGE, VIDEO_EXTENSIONS
+from .constants import COVER_EDGE, HIGH_THUMBNAIL_EDGE, THUMBNAIL_DIR, THUMBNAIL_EDGE, VIDEO_EXTENSIONS
 from .database import ensure_app_dirs
 from .models import MediaMetadata
 
@@ -324,9 +324,9 @@ def _failure_marker(target: Path) -> Path:
 
 
 def thumbnail_cache_files(path: Path, file_size: int, modified_ns: int) -> list[Path]:
-    """Every cache file that may exist for one media item (grid thumbnail and cover)."""
+    """Every cache file that may exist for one media item (grid thumbnail in either quality, and cover)."""
     files = []
-    for edge in (THUMBNAIL_EDGE, COVER_EDGE):
+    for edge in (THUMBNAIL_EDGE, HIGH_THUMBNAIL_EDGE, COVER_EDGE):
         target = thumbnail_cache_path(path, file_size, modified_ns, edge)
         files += [target, _failure_marker(target)]
     return files

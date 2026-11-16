@@ -5,7 +5,7 @@ from datetime import datetime
 
 from photolibrary.core import media
 from photolibrary.core.cache_cleanup import STALE_PART_SECONDS, cache_size, clear_thumbnail_cache, prune_thumbnail_cache
-from photolibrary.core.constants import COVER_EDGE
+from photolibrary.core.constants import COVER_EDGE, HIGH_THUMBNAIL_EDGE
 
 from .base import TempAppTestCase
 
@@ -88,3 +88,22 @@ class CacheCleanupTests(TempAppTestCase):
         self.assertEqual((result.removed, result.freed_bytes), (3, size))
         self.assertEqual(cache_size(self.thumb_dir), (0, 0))
         self.assertEqual(clear_thumbnail_cache(self.root / "missing"), result.__class__(0, 0, 0))
+
+    def test_switching_quality_keeps_only_the_size_in_use(self):
+        from PIL import Image
+        big = self.write_photo(self.root / "big.jpg", size=(2000, 1500))
+        stat = big.stat()
+        with Image.open(media.get_cached_thumbnail(big, "image", stat.st_size, stat.st_mtime_ns,
+                                                   HIGH_THUMBNAIL_EDGE)) as image:
+            self.assertEqual(image.size, (1024, 768))
+        high = media.get_cached_thumbnail(self.keep, "image", *self.keep_entry[1:], HIGH_THUMBNAIL_EDGE)
+        prune_thumbnail_cache(self.thumb_dir, [self.keep_entry], grid_edge=HIGH_THUMBNAIL_EDGE)
+        self.assertTrue(high.exists() and self.keep_cover.exists())
+        self.assertFalse(self.keep_grid.exists())  # the standard size went
+        # Back to Standard: the larger ones go once the standard ones are made again.
+        grid = media.get_cached_thumbnail(self.keep, "image", *self.keep_entry[1:])
+        prune_thumbnail_cache(self.thumb_dir, [self.keep_entry])
+        self.assertTrue(grid.exists())
+        self.assertFalse(high.exists())
+        # Moving a file to the Trash removes both sizes.
+        self.assertIn(high, media.thumbnail_cache_files(self.keep, *self.keep_entry[1:]))
