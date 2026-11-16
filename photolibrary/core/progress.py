@@ -21,9 +21,11 @@ TOLERANCE = 0.25
 class Eta:
     """Estimates the time left from how fast `done` has been growing, without jumping around."""
 
-    def __init__(self, now: float | None = None):
+    def __init__(self, now: float | None = None, done: int = 0):
+        """`done`: how much was already done when timing starts (say, resuming after a pause)."""
         self.started = time.monotonic() if now is None else now
-        self._samples: deque[tuple[float, int]] = deque([(self.started, 0)])
+        self._base = done
+        self._samples: deque[tuple[float, int]] = deque([(self.started, done)])
         self._shown: float | None = None  # the last estimate given out...
         self._shown_at = self.started    # ...and when
 
@@ -39,11 +41,12 @@ class Eta:
             return 0.0
         self._record(now, done)
         elapsed = now - self.started
-        if elapsed < MIN_SECONDS or done < total * MIN_FRACTION or done <= 0:
+        progress = done - self._base
+        if elapsed < MIN_SECONDS or progress < (total - self._base) * MIN_FRACTION or progress <= 0:
             return None
         oldest_time, oldest_done = self._samples[0]
         recent = (done - oldest_done) / (now - oldest_time) if now > oldest_time else 0.0
-        overall = done / elapsed
+        overall = progress / elapsed
         rate = (recent + overall) / 2  # steady like the overall rate, but follows a lasting change of pace
         estimate = (total - done) / rate
         if self._shown is not None:

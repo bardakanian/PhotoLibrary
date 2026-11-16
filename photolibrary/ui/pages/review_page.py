@@ -33,6 +33,11 @@ class FaceTileDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index) -> QSize:
         return QSize(TILE + 8, TILE + 8)
 
+    def editorEvent(self, event, model, option, index) -> bool:
+        # The page toggles a tile on any click. Qt would also toggle the (undrawn) checkbox near the
+        # tile's left edge, and the two toggles cancelled out: such clicks did nothing.
+        return False
+
     def paint(self, painter: QPainter, option, index) -> None:
         suggestion: FaceSuggestion = index.data(SuggestionRole)
         ticked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
@@ -164,7 +169,7 @@ class ReviewPage(QWidget):
         self.no_button.clicked.connect(lambda: self.answer(False))
         self.skip_button.clicked.connect(self.skip)
         for keys, slot in (("Y", lambda: self.answer(True)), ("N", lambda: self.answer(False)),
-                           ("Right", self.skip), ("S", self.skip), ("Esc", self.back_requested.emit)):
+                           ("Right", self.skip), ("S", self.skip), ("Esc", self._escape)):
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(slot)
@@ -274,6 +279,13 @@ class ReviewPage(QWidget):
         if rejected:
             text += f", Not Them {len(rejected):,}"
         self.grid_accept_button.setText(text)
+
+    def _escape(self) -> None:
+        """Esc leaves a person's grid (nothing saved) for the one-at-a-time view; there, it leaves Review."""
+        if self.stack.currentIndex() == 2:
+            self._show_current()
+        else:
+            self.back_requested.emit()
 
     def go_on(self) -> None:
         """Show what's left after answers given in bulk."""

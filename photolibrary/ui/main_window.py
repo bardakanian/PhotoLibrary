@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
         self.warm_eta = Eta()
         self.warm_eta_key: tuple | None = None
         self.people_eta = Eta()
+        self.people_started = Eta()  # the whole pass, pauses included: for "took X"
         self.people_eta_key: tuple | None = None
         # People: finding faces runs after warming, and pauses for scans and video like warming.
         self.people_events = IndexEvents()
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         self.people_pending = False
         self.people_id = 0
         self.people_paused = False  # waiting for the Mac to cool down
+        self.people_eta_resumed = False  # the next progress starts a fresh estimate
         self.face_engine_factory = OpenCVFaceEngine  # called with the models folder; tests use a fake
         self.ready_text = "Ready"
         self.scan_notes: list[str] = []  # "3 new or changed" and so on, from the last scan
@@ -1443,6 +1445,8 @@ class MainWindow(QMainWindow):
             self.people_paused = event["paused"]
             if event["paused"]:
                 self.status.setText("Finding people  ·  paused while the Mac cools down")
+            else:
+                self.people_eta_resumed = True  # time the rest afresh: the pause isn't slow progress
             return
         if kind == "downloading":
             self.status.setText("Downloading the face models (about 38 MB, once)…")
@@ -1450,6 +1454,10 @@ class MainWindow(QMainWindow):
             done, total = event["done"], event["total"]
             if self.people_eta_key != (event["id"], total):
                 self.people_eta, self.people_eta_key = Eta(), (event["id"], total)
+                self.people_started = self.people_eta
+                self.people_eta_resumed = False
+            elif self.people_eta_resumed:
+                self.people_eta, self.people_eta_resumed = Eta(done=done), False
             self.progress.setRange(0, max(1, total))
             self.progress.setValue(done)
             self.progress.show()
@@ -1462,11 +1470,11 @@ class MainWindow(QMainWindow):
             self.progress.hide()
             analyzed = event["result"].analyzed
             if analyzed:
-                took = self.people_eta.elapsed() if self.people_eta_key and self.people_eta_key[0] == event["id"] else 0
+                took = self.people_started.elapsed() if self.people_eta_key and self.people_eta_key[0] == event["id"] else 0
                 timing = f" in {format_duration_words(took)}" if took >= 10 else ""
                 self.status.setText(self.ready_text + f"  ·  people updated from {analyzed:,} photos{timing}")
                 if took:
-                    self._announce_if_long(self.people_eta, "People updated",
+                    self._announce_if_long(self.people_started, "People updated",
                                            f"{analyzed:,} photos analysed for faces in {format_duration_words(took)}.")
             self.reload_sidebar()
             if self.scope_kind in ("person", "group"):

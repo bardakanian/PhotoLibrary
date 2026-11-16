@@ -50,3 +50,9 @@ class EtaTests(unittest.TestCase):
         self.assertEqual(time_left_text(None), "estimating time left…")
         self.assertEqual(time_left_text(2), "almost done")
         self.assertEqual(time_left_text(200), "about 3 min left")
+
+    def test_resuming_part_way_times_only_what_follows(self):
+        eta = Eta(now=100, done=5_000)  # resumed after a pause, 5,000 already done
+        for second in range(1, 11):
+            left = eta.remaining(5_000 + second * 100, 10_000, now=100 + second)
+        self.assertAlmostEqual(left, 40, delta=1)  # 4,000 left at 100 a second

@@ -671,6 +671,23 @@ class PeopleWindowTests(WindowTestCase):
                         and all(row == (ana, 1) for row in self.face_rows(others).values()), message="answers saved")
         self.assertEqual(review.empty.title_label.text(), "All caught up")
 
+    def test_any_click_on_a_tile_toggles_it_and_esc_goes_back_to_the_question(self):
+        from PySide6.QtCore import QPoint
+        ana, _loose, review = self._review_with_suggestions(3)
+        review.show_person(ana)
+        self.settle()
+        rect = review.grid.visualRect(review.grid_model.index(0, 0))
+        for point in (rect.center(), QPoint(rect.left() + 10, rect.center().y())):  # the left edge too
+            before = review.grid_model.item(0).checkState()
+            QTest.mouseClick(review.grid.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+            self.assertNotEqual(review.grid_model.item(0).checkState(), before)
+        QTest.keyClick(review, Qt.Key.Key_Escape)
+        self.assertTrue(self.window.review_active)
+        self.assertTrue(review.showing_card)  # back to one at a time; nothing was saved
+        self.assertEqual(review.answers, 0)
+        QTest.keyClick(review, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.review_active)
+
     def test_viewer_shows_faces_and_fixes_one_face(self):
         header = self.find_people()
         ana = header.child(0).data(ScopeRole)[1]
@@ -994,6 +1011,25 @@ class TimeLeftTests(WindowTestCase):
         self.assertIn("all thumbnails ready (in 2 min)", window.status.text())
         notify.assert_called_once()
         self.assertEqual(notify.call_args[0][0], "Thumbnails ready")
+
+    def test_a_heat_pause_does_not_count_as_slow_progress(self):
+        window = self.window
+        window.people_id += 1000
+        people = window.people_id
+
+        def progress(done):
+            window._handle_people_event({"type": "progress", "id": people, "done": done, "total": 10_000})
+
+        for second in range(0, 11):
+            progress(second * 100)  # 100 a second
+            self.clock[0] += 1
+        window._handle_people_event({"type": "paused", "id": people, "paused": True})
+        self.clock[0] += 600  # ten minutes cooling down
+        window._handle_people_event({"type": "paused", "id": people, "paused": False})
+        for second in range(0, 11):
+            progress(1_000 + second * 100)
+            self.clock[0] += 1
+        self.assertIn("about 1 min left", window.status.text())  # 8,000 left at 100 a second, not hours
 
     def test_indexing_shows_time_left_per_folder(self):
         window = self.window

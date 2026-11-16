@@ -5,6 +5,18 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.22.1 — 2026-11-15
+
+Three bug fixes:
+
+- **Check by Person:** clicking near the left edge of a face did nothing (Qt toggled a hidden
+  checkbox and the page toggled it back). Any click on a face now ticks or unticks it.
+- **Esc in Check by Person** went straight back to the library, losing the ticks; it now returns
+  to the one-at-a-time question, and a second Esc leaves Review.
+- **Time left after a heat pause:** the pause counted as slow progress, so the estimate showed
+  hours for a while after the Mac cooled down. It now times only what follows, and "took X" still
+  counts the whole pass.
+
 ## 1.22.0 — 2026-11-15
 
 - **Review in bulk.** **Accept Likely Matches** adds every suggestion at least 70% alike (as alike
