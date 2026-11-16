@@ -878,6 +878,32 @@ class MediaRepository:
         finally:
             connection.close()
 
+    def answer_faces(self, yes: Iterable[tuple[int, int]] = (), no: Iterable[tuple[int, int]] = ()) -> int:
+        """Many Review answers at once, in one transaction: (face, person) pairs for "this is them"
+        (as `assign_face`) and "this isn't them" (as `reject_face`). Returns how many were answered.
+
+        One commit (and one people.json write) instead of one per face: accepting 1,500 suggestions
+        one by one would rewrite the backup 1,500 times.
+        """
+        yes, no = list(yes), list(no)
+        if not yes and not no:
+            return 0
+        connection = open_database()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            people = {row[0] for row in connection.execute("SELECT id FROM people")}
+            for face_id, person_id in yes:
+                if person_id in people:
+                    connection.execute("UPDATE faces SET person_id = ?, pinned = 1 WHERE id = ?", (person_id, face_id))
+                    connection.execute("DELETE FROM face_rejections WHERE face_id = ? AND person_id = ?",
+                                       (face_id, person_id))
+            for face_id, person_id in no:
+                self._reject(connection, face_id, person_id)
+            self._commit_people(connection)
+            return len(yes) + len(no)
+        finally:
+            connection.close()
+
     def new_person_for_face(self, face_id: int, name: str) -> int:
         """Start a new person from this one face."""
         connection = open_database()

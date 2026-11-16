@@ -20,7 +20,7 @@ from ..core import media as media_module
 from ..core.cache_cleanup import cache_size, clear_thumbnail_cache, prune_thumbnail_cache
 from ..core import database as database_module
 from ..core.faces import FACES_ENABLED, ModelError, OpenCVFaceEngine, ensure_models, models_present
-from ..core.people import run_people_pass
+from ..core.people import LIKELY_MATCH, run_people_pass
 from ..core.constants import APP_NAME, COVER_EDGE, VERSION
 from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
 from ..core.trash import TrashResult, trash_items
@@ -338,6 +338,8 @@ class MainWindow(QMainWindow):
         self.review = ReviewPage(self.loader, self.theme)
         self.review.back_requested.connect(self.close_review)
         self.review.answered.connect(self._review_answered)
+        self.review.accept_likely_requested.connect(self.accept_likely_matches)
+        self.review.person_answered.connect(self._answer_faces)
         self.people_list: list = []  # the latest people shown in the sidebar (their covers, for Review)
         self.review_request_id = 0
         self.select_group_after_reload: int | None = None  # a group just created, shown once listed
@@ -1625,6 +1627,51 @@ class MainWindow(QMainWindow):
             self._change_people(lambda repository: repository.assign_face(face, person), refresh=False)
         else:
             self._change_people(lambda repository: repository.reject_face(face, person), refresh=False)
+
+    def accept_likely_matches(self, matches) -> None:
+        """Accept every close match (Review ▸ Accept Likely Matches), after showing how many per person."""
+        if not matches:
+            return
+        counts: dict[str, int] = {}
+        for entry in matches:
+            counts[entry.name or "Unnamed person"] = counts.get(entry.name or "Unnamed person", 0) + 1
+        lines = "\n".join(f"• {name}: {count:,}" for name, count in sorted(counts.items(), key=lambda kv: -kv[1]))
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Accept likely matches?")
+        dialog.setText(f"Add {len(matches):,} faces to the people they look like?")
+        dialog.setInformativeText(f"{lines}\n\nEach is at least {LIKELY_MATCH:.0%} alike: as alike as a person's own "
+                                  "photos usually are. The others stay in Review.")
+        accept = dialog.addButton(f"Add {len(matches):,}", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(accept)
+        self._exec_message(dialog)
+        dialog.deleteLater()
+        if dialog.clickedButton() is accept:
+            self.review.forget([entry.face_id for entry in matches])
+            self.review.answers += len(matches)
+            self.review.go_on()
+            self._answer_faces(matches, [])
+
+    def _exec_message(self, dialog) -> None:
+        """Show a question box. Separate so tests can answer it."""
+        dialog.exec()
+
+    def _answer_faces(self, accepted, rejected) -> None:
+        """Save many Review answers in one go."""
+        yes = [(entry.face_id, entry.person_id) for entry in accepted]
+        no = [(entry.face_id, entry.person_id) for entry in rejected]
+        count = len(yes) + len(no)
+        repository = self.repository
+
+        def done(_result):
+            self.status.setText(f"Added {len(yes):,} faces to people" + (f", {len(no):,} marked as not them" if no else ""))
+            if not self.review_active:
+                self.refresh_library()
+
+        if count:
+            run_async(self.io_pool, lambda: repository.answer_faces(yes, no), done,
+                      lambda error: LOGGER.error("Could not save Review answers", exc_info=error))
 
     def set_least_typical(self, on: bool) -> None:
         """Show the person's photos with the least typical face first, as one list in All Photos."""

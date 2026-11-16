@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from photolibrary.core import media
 from photolibrary.core.faces import FACES_ENABLED
+from photolibrary.ui.pages.review_page import SuggestionRole
 from photolibrary.ui.widgets.sidebar import CountRole, ScopeRole
 
 from ..fake_faces import FakeFaceEngine, write_people_photo
@@ -628,6 +629,47 @@ class PeopleWindowTests(WindowTestCase):
         # The rejected face isn't suggested again; the skipped one still is.
         self.wait_until(lambda: header.child(0).data(ReviewRole) and header.child(0).data(CountRole) == 1,
                         message="one suggestion left")
+
+    def _review_with_suggestions(self, count: int):
+        header = self.find_people()
+        ana = header.child(0).data(ScopeRole)[1]
+        self.window.repository.rename_person(ana, "Ana")
+        loose = self.loosen_faces(ana, count)
+        self.window.show_review()
+        review = self.window.review
+        self.wait_until(lambda: len(review.suggestions) == count, message="suggestions")
+        return ana, loose, review
+
+    def test_accept_likely_matches_adds_them_all_after_one_question(self):
+        ana, loose, review = self._review_with_suggestions(3)
+        self.assertEqual(review.likely_button.text(), "Accept Likely Matches (3)…")
+        asked = []
+
+        def click_add(dialog):
+            asked.append(dialog.informativeText())
+            next(button for button in dialog.buttons() if button.text().startswith("Add")).click()
+
+        with patch.object(self.window, "_exec_message", click_add):
+            review.likely_button.click()
+        self.assertIn("Ana: 3", asked[0])
+        self.wait_until(lambda: all(row == (ana, 1) for row in self.face_rows(loose).values()), message="saved")
+        self.assertEqual(review.empty.title_label.text(), "All caught up")
+        self.assertFalse(review.likely_button.isEnabled())
+
+    def test_check_by_person_adds_the_ticked_and_rejects_the_rest(self):
+        ana, loose, review = self._review_with_suggestions(3)
+        review.show_person(ana)
+        self.assertEqual(review.grid_model.rowCount(), 3)
+        QTest.keyClick(review, Qt.Key.Key_Y)  # Y answers the one-at-a-time card only, never the grid
+        self.assertEqual(review.answers, 0)
+        first = review.grid_model.item(0).data(SuggestionRole).face_id
+        review._toggle_tile(review.grid_model.index(0, 0))
+        self.assertEqual(review.grid_accept_button.text(), "Add 2, Not Them 1")
+        review.grid_accept_button.click()
+        others = [face for face in loose if face != first]
+        self.wait_until(lambda: self.face_rows([first]) == {first: (None, 0)}
+                        and all(row == (ana, 1) for row in self.face_rows(others).values()), message="answers saved")
+        self.assertEqual(review.empty.title_label.text(), "All caught up")
 
     def test_viewer_shows_faces_and_fixes_one_face(self):
         header = self.find_people()

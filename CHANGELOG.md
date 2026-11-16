@@ -5,6 +5,17 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.22.0 — 2026-11-15
+
+- **Review in bulk.** **Accept Likely Matches** adds every suggestion at least 70% alike (as alike
+  as a person's own photos usually are) after one question showing how many per person. On a
+  real library that was 1,537 of 2,646 suggestions. The rest stay in Review.
+- **Check by Person** shows one person's suggestions as a grid, closest first, all ticked. Click
+  the faces that aren't them, then **Add**: ticked faces join the person, unticked ones are
+  remembered as not them.
+- Bulk answers are saved in one go (one backup of names instead of one per face), and Y, N and →
+  only answer the one-at-a-time question, never the grid.
+
 ## 1.21.0 — 2026-11-15
 
 - **Finding people stays cool.** It analyses 3 photos at a time instead of up to 8 (the first

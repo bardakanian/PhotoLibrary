@@ -59,7 +59,10 @@ incremental indexer) come from the On This Day app.
   (or press ⌥⌫, which also works on the photo open in the viewer).
   - **Review Suggestions** (top of the People section, or ⇧⌘P) asks about faces that look like
     someone you have named but weren't grouped with them: "Is this Ana?" Answer with Y, N, or →
-    to skip. Your answers are kept, even when people are regrouped. Only named people are
+    to skip. Your answers are kept, even when people are regrouped. For many at once, **Accept
+    Likely Matches** adds every suggestion at least 70% alike after showing how many per person,
+    and **Check by Person** shows one person's suggestions as a ticked grid: click the ones that
+    aren't them, then Add. Only named people are
     suggested, so name someone to get suggestions for them; the many unnamed groups (mostly
     passers-by) never produce questions.
   - **Groups:** right-click a person ▸ **Add to Group** ▸ **New Group…** (or View ▸ New
@@ -441,7 +444,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 282 tests (about a minute and a half). It includes headless UI tests that drive
+The suite has 285 tests (about a minute and a half). It includes headless UI tests that drive
 the real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 People, groups and Review, folder watching, theme changes, the freeze monitor and pausing
 thumbnail work during playback) on a generated library. People tests use a fake face engine,

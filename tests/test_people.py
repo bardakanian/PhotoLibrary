@@ -399,6 +399,20 @@ class PeopleLibraryTests(TempAppTestCase):
         self.assertEqual([entry["name"] for entry in backup["people"]], ["Ana"])
         self.assertEqual(list(self.app_dir.glob("*.tmp")), [])
 
+    def test_many_answers_are_saved_at_once(self):
+        self.analyze()
+        first, second = self.people()
+        self.repo.rename_person(first.id, "Ana")
+        yes, no = self.loosen(first.id, 2)
+        with unittest.mock.patch.object(self.repo, "write_people_backup") as backup:
+            self.assertEqual(self.repo.answer_faces([(yes, first.id)], [(no, first.id)]), 2)
+        backup.assert_called_once()  # one backup for the lot, not one per face
+        faces = {face.id: face for item in self.repo.query(self.library) for face in self.repo.faces_in_photo(item.id)}
+        self.assertEqual((faces[yes].person_id, faces[yes].confirmed), (first.id, True))
+        self.assertIsNone(faces[no].person_id)
+        self.assertEqual(self.repo.face_suggestions(self.library), [])  # "not them" isn't suggested again
+        self.assertEqual(self.repo.answer_faces(), 0)
+
     def test_a_damaged_backup_is_ignored(self):
         self.app_dir.mkdir(parents=True, exist_ok=True)
         (self.app_dir / database.PEOPLE_BACKUP).write_text("{not json")
