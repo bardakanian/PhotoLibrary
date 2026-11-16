@@ -42,9 +42,11 @@ ANALYZE_EDGE = 1920
 MIN_FACE_PIXELS = 32
 MIN_FACE_SCORE = 0.75
 EMBEDDING_SIZE = 128
-# Photos analysed at once. Measured on 10 cores (12 MP HEIC and JPEG): 3 workers 36 ms per photo,
-# 8 workers 24 ms. Eight kept a fanless MacBook Air hot for the whole first pass, so it is gentle:
-# three, at about 1.5 times the time, and fewer still when the Mac says it is warm (core/thermal.py).
+# Photos analysed at once. Measured on a 10-core MacBook Air, 2½ minutes per setting on 400 real
+# photos: 3 workers 1,351 photos a minute and the Mac stayed cool; 8 workers 1,748 a minute at first
+# but 1,540 once warm, and the Mac warmed up. So three: about 14% slower, cool and responsive, and fewer
+# still when the Mac says it is warm (core/thermal.py). OpenCV's own threads help: limiting them to one
+# per worker was slower with both 3 and 8 workers (1,098 and 1,238 a minute).
 DEFAULT_WORKERS = min(3, max(1, (os.cpu_count() or 4) - 2))
 # How often a pause for heat checks whether the Mac has cooled down.
 COOL_DOWN_CHECK_SECONDS = 5.0

@@ -30,8 +30,8 @@ Three bug fixes:
 
 ## 1.21.0 — 2026-11-15
 
-- **Finding people stays cool.** It analyses 3 photos at a time instead of up to 8 (the first
-  pass takes about 1.5 times as long), one at a time when macOS says the Mac is getting warm, and
+- **Finding people stays cool.** It analyses 3 photos at a time instead of up to 8 (measured over
+  2½ minutes on a real library: about 14% slower once the Mac is warm, and the Mac stays cool), one at a time when macOS says the Mac is getting warm, and
   pauses when it says the Mac is hot, carrying on by itself once it has cooled down. The status
   bar says "paused while the Mac cools down". Nothing is skipped or lost.
 
