@@ -83,7 +83,9 @@ incremental indexer) come from the On This Day app.
     once (about 38 MB) and checked against fixed checksums. Fingerprints are grouped with
     DBSCAN. Names, merges and removals are kept when new photos are added.
   - **Cost:** the first pass reads every photo once in the background, after thumbnails are
-    ready, and pauses while a video plays or a scan runs. Later passes look only at new or
+    ready, and pauses while a video plays or a scan runs. It works gently (3 photos at a time), one
+    at a time when macOS says the Mac is getting warm, and pauses while it's hot, so a fanless
+    MacBook Air stays cool. Later passes look only at new or
     edited photos. Videos aren't analysed.
 - **Hide an album:** right-click it in the sidebar and choose **Hide Album**. Its photos
   disappear from All Photos, Photos, Videos, Years, Months, search, the counts and Insights,
@@ -408,6 +410,7 @@ photolibrary/
 │   ├── workqueue.py       Re-prioritisable background job queue
 │   ├── formatting.py      Labels for sizes, durations, dates
 │   ├── progress.py        Time-left estimates for long jobs
+│   ├── thermal.py         The Mac's thermal state, so face finding eases off when it's warm
 │   ├── zoom.py            Viewer zoom and pan arithmetic
 │   └── settings.py        Remembered settings (JSON)
 └── ui/
@@ -438,7 +441,7 @@ Run the tests from the project root:
 python -m unittest -v
 ```
 
-The suite has 275 tests (about a minute and a half). It includes headless UI tests that drive
+The suite has 282 tests (about a minute and a half). It includes headless UI tests that drive
 the real window (grid, selection, viewer, trash, search, sort, albums, Insights, Live Photos,
 People, groups and Review, folder watching, theme changes, the freeze monitor and pausing
 thumbnail work during playback) on a generated library. People tests use a fake face engine,

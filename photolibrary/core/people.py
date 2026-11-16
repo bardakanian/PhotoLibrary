@@ -255,7 +255,7 @@ SAVE_BATCH = 50  # photos per database write while analysing
 
 
 def run_people_pass(repository, folders, make_engine, stop_event, on_progress=None, engine_version: int | None = None,
-                    load_image=None):
+                    load_image=None, heat=None, on_pause=None):
     """Analyse every photo not yet analysed, then regroup. Runs on a background thread.
 
     `make_engine()` is only called when there is work, so the models are only loaded (or
@@ -277,6 +277,8 @@ def run_people_pass(repository, folders, make_engine, stop_event, on_progress=No
 
     engine = make_engine() if todo else None
     extra = {"load_image": load_image} if load_image is not None else {}
+    if heat is not None:
+        extra.update(heat=heat, on_pause=on_pause)
     result = analyze_photos(todo, engine, stop_event, keep, on_progress, **extra)
     if batch:
         repository.save_faces(batch, version)

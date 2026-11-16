@@ -5,6 +5,13 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.21.0 — 2026-11-15
+
+- **Finding people stays cool.** It analyses 3 photos at a time instead of up to 8 (the first
+  pass takes about 1.5 times as long), one at a time when macOS says the Mac is getting warm, and
+  pauses when it says the Mac is hot, carrying on by itself once it has cooled down. The status
+  bar says "paused while the Mac cools down". Nothing is skipped or lost.
+
 ## 1.20.0 — 2026-11-15
 
 - **Settings ▸ Thumbnail quality:** **High** makes grid thumbnails twice as large (1,024 px), so

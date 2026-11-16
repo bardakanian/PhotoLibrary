@@ -1082,3 +1082,14 @@ class ThumbnailQualityTests(WindowTestCase):
         with patch.object(window, "_exec_dialog", choose_high), patch.object(window, "set_thumbnail_quality") as switch:
             window.show_preferences()
         switch.assert_called_once_with("high")
+
+
+class HeatPauseTests(WindowTestCase):
+    def test_status_says_finding_people_waits_for_the_mac_to_cool(self):
+        window = self.window
+        window.people_id += 1000
+        window._handle_people_event({"type": "paused", "id": window.people_id, "paused": True})
+        self.assertIn("paused while the Mac cools down", window.status.text())
+        self.assertTrue(window.people_paused)
+        window._handle_people_event({"type": "paused", "id": window.people_id, "paused": False})
+        self.assertFalse(window.people_paused)

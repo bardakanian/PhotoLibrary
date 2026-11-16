@@ -27,6 +27,7 @@ from ..core.trash import TrashResult, trash_items
 from ..core.watcher import LibraryWatcher
 from ..core.formatting import format_size
 from ..core.progress import Eta, format_duration_words, time_left_text
+from ..core.thermal import thermal_state
 from ..core.search import SearchFilter, parse_query
 from ..core.settings import MAX_ZOOM, MIN_ZOOM, SettingsStore
 from .dialogs import GroupDialog, PreferencesDialog
@@ -118,6 +119,7 @@ class MainWindow(QMainWindow):
         self.people_stop = threading.Event()
         self.people_pending = False
         self.people_id = 0
+        self.people_paused = False  # waiting for the Mac to cool down
         self.face_engine_factory = OpenCVFaceEngine  # called with the models folder; tests use a fake
         self.ready_text = "Ready"
         self.scan_notes: list[str] = []  # "3 new or changed" and so on, from the last scan
@@ -1415,7 +1417,8 @@ class MainWindow(QMainWindow):
                 result, groups = run_people_pass(
                     repository, folders, make_engine, stop,
                     lambda done, total: emit({"type": "progress", "id": people_id, "done": done, "total": total}),
-                    load_image=decode_for_faces)
+                    load_image=decode_for_faces, heat=thermal_state,
+                    on_pause=lambda paused: emit({"type": "paused", "id": people_id, "paused": paused}))
                 emit({"type": "cancelled" if groups is None else "done", "id": people_id, "result": result,
                       "groups": groups})
             except ModelError as exc:
@@ -1433,6 +1436,12 @@ class MainWindow(QMainWindow):
         if event.get("id") != self.people_id or self.scanning:
             return
         kind = event["type"]
+        if kind == "paused":
+            # The Mac said it was getting hot: analysis waits (and its time-left estimate with it).
+            self.people_paused = event["paused"]
+            if event["paused"]:
+                self.status.setText("Finding people  ·  paused while the Mac cools down")
+            return
         if kind == "downloading":
             self.status.setText("Downloading the face models (about 38 MB, once)…")
         elif kind == "progress":

@@ -42,11 +42,12 @@ ANALYZE_EDGE = 1920
 MIN_FACE_PIXELS = 32
 MIN_FACE_SCORE = 0.75
 EMBEDDING_SIZE = 128
-# Photos analysed at once. Decoding and the models release the GIL, so threads scale; measured on
-# 10 cores (12 MP HEIC and JPEG): 3 workers 36 ms per photo, 6 27 ms, 8 24 ms, 9 23 ms, with the UI
-# thread never waiting more than 12 ms. Two cores stay free for the UI, and each worker holds its
-# own copy of the models (about 40 MB), so it stops at 8.
-DEFAULT_WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))
+# Photos analysed at once. Measured on 10 cores (12 MP HEIC and JPEG): 3 workers 36 ms per photo,
+# 8 workers 24 ms. Eight kept a fanless MacBook Air hot for the whole first pass, so it is gentle:
+# three, at about 1.5 times the time, and fewer still when the Mac says it is warm (core/thermal.py).
+DEFAULT_WORKERS = min(3, max(1, (os.cpu_count() or 4) - 2))
+# How often a pause for heat checks whether the Mac has cooled down.
+COOL_DOWN_CHECK_SECONDS = 5.0
 PROGRESS_INTERVAL = 0.5
 
 
@@ -194,7 +195,9 @@ def analyze_photos(items: Sequence[MediaItem], engine: FaceEngine, stop_event: t
                    on_result: Callable[[MediaItem, list[Face]], None],
                    on_progress: Callable[[int, int], None] | None = None,
                    workers: int = DEFAULT_WORKERS,
-                   load_image: Callable[[Path, int], Image.Image | None] = load_display_image) -> AnalyzeResult:
+                   load_image: Callable[[Path, int], Image.Image | None] = load_display_image,
+                   heat: Callable[[], int | None] | None = None,
+                   on_pause: Callable[[bool], None] | None = None) -> AnalyzeResult:
     """Find the faces in each photo (in order) on worker threads.
 
     `on_result(item, faces)` runs on the calling thread, so the caller can write to the database
@@ -202,7 +205,11 @@ def analyze_photos(items: Sequence[MediaItem], engine: FaceEngine, stop_event: t
     changes. A photo that can't be reached at all (an unplugged drive) gets no result and is
     tried again next time. `load_image(path, max_edge)` decodes an EXIF-rotated photo; the UI
     passes one that uses the system decoder, which reads HEIC about 9 times faster than Pillow.
+
+    `heat()` returns the Mac's thermal state (core/thermal.py): when warm, one photo at a time;
+    when hot, it pauses (telling `on_pause(True)`, then `on_pause(False)`) until it cools down.
     """
+    from .thermal import allowed_workers
     analyzed = found = failed = done = unreachable = 0
     total = len(items)
     if not total:
@@ -254,12 +261,31 @@ def analyze_photos(items: Sequence[MediaItem], engine: FaceEngine, stop_event: t
                 last_report = now
                 on_progress(done, total)
 
+        paused = False
         for item in items:
             if stop_event.is_set():
                 break
-            in_flight[executor.submit(analyze, item)] = item
-            if len(in_flight) >= workers * 2:
+            limit = allowed_workers(workers, heat()) if heat else workers
+            while limit == 0 and not stop_event.is_set():
+                if in_flight:
+                    collect(FIRST_COMPLETED)  # finish what's running, start nothing new
+                    limit = allowed_workers(workers, heat())
+                    continue
+                if not paused and on_pause:
+                    on_pause(True)
+                paused = True
+                stop_event.wait(COOL_DOWN_CHECK_SECONDS)
+                limit = allowed_workers(workers, heat())
+            if paused:
+                paused = False
+                if on_pause:
+                    on_pause(False)
+            if stop_event.is_set():
+                break
+            # A small backlog keeps the threads busy; while the Mac is warm, one photo at a time.
+            while len(in_flight) >= (workers * 2 if limit >= workers else limit):
                 collect(FIRST_COMPLETED)
+            in_flight[executor.submit(analyze, item)] = item
         while in_flight and not stop_event.is_set():
             collect(FIRST_COMPLETED)
     finally:
