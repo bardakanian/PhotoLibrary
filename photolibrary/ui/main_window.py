@@ -19,7 +19,10 @@ from ..core.media import FFMPEG_ENABLED, HEIC_ENABLED, open_in_default_app, reve
 from ..core import media as media_module
 from ..core.cache_cleanup import cache_size, clear_thumbnail_cache, prune_thumbnail_cache
 from ..core import database as database_module
-from ..core.faces import FACES_ENABLED, ModelError, OpenCVFaceEngine, ensure_models, models_present
+from ..core.faces import (
+    FACES_ENABLED, GPU_SUPPORTED, ModelError, ensure_models, gpu_runtime_installed, make_face_engine, models_present,
+)
+from ..core.export import export_files
 from ..core.people import LIKELY_MATCH, run_people_pass
 from ..core.constants import APP_NAME, COVER_EDGE, VERSION
 from ..core.thumbnail_warmer import WarmResult, warm_thumbnails
@@ -118,11 +121,19 @@ class MainWindow(QMainWindow):
         self.people_events = IndexEvents()
         self.people_events.received.connect(self._handle_people_event)
         self.people_stop = threading.Event()
+        self.export_events = IndexEvents()
+        self.export_events.received.connect(self._handle_export_event)
+        self.export_stop = threading.Event()
+        self.export_thread: threading.Thread | None = None
+        self.export_id = 0
         self.people_pending = False
         self.people_id = 0
         self.people_paused = False  # waiting for the Mac to cool down
         self.people_eta_resumed = False  # the next progress starts a fresh estimate
-        self.face_engine_factory = OpenCVFaceEngine  # called with the models folder; tests use a fake
+        # Called with the models folder; tests use a fake. None: the real models (on the NVIDIA card
+        # when `settings.use_gpu` is on and it is usable, on Windows only).
+        self.face_engine_factory = None
+        self.face_device = ""  # where the current pass finds faces, for the status text
         self.ready_text = "Ready"
         self.scan_notes: list[str] = []  # "3 new or changed" and so on, from the last scan
         self.library_totals: tuple[int, int] | None = None  # (shown, hidden) items, from the sidebar query
@@ -420,6 +431,8 @@ class MainWindow(QMainWindow):
         self.remove_folder_menu = file_menu.addMenu("Remove Folder from Library")
         self.remove_folder_menu.aboutToShow.connect(self._fill_remove_folder_menu)
         action(file_menu, "Rescan Library", "Ctrl+R", self.start_indexing)
+        file_menu.addSeparator()
+        action(file_menu, "Export…", "Ctrl+Shift+E", self.export_selected)
         file_menu.addSeparator()
         # On macOS Qt moves this into the application menu (where Settings lives on a Mac);
         # elsewhere it stays in File.
@@ -1003,7 +1016,8 @@ class MainWindow(QMainWindow):
                                           "Clear Search", "clear_search")
             elif self.scope_kind == "group":
                 self.grid_page.show_empty("No photos of them together",
-                                          f"No shown photos have everyone in “{self.scope_label}” in them.",
+                                          f"No shown photos have everyone in “{self.scope_label}”, "
+                                          "and no one else, in them.",
                                           "Show All Photos", "show_all")
             elif self.scope_kind == "person":
                 self.grid_page.show_empty("No photos of this person",
@@ -1408,13 +1422,18 @@ class MainWindow(QMainWindow):
         people_id = self.people_id
         stop = self.people_stop = threading.Event()
         repository, folders, models, factory = self.repository, self.roots, self.models_dir, self.face_engine_factory
+        use_gpu = GPU_SUPPORTED and self.settings.use_gpu
         emit = self.people_events.received.emit
 
         def make_engine():
-            if factory is OpenCVFaceEngine and not models_present(models):
+            if factory is not None:
+                return factory(models)
+            if not models_present(models):
                 emit({"type": "downloading", "id": people_id})
                 ensure_models(models)
-            return factory(models)
+            engine = make_face_engine(models, use_gpu)
+            emit({"type": "engine", "id": people_id, "device": engine.device if GPU_SUPPORTED else ""})
+            return engine
 
         def run():
             try:
@@ -1450,6 +1469,8 @@ class MainWindow(QMainWindow):
             return
         if kind == "downloading":
             self.status.setText("Downloading the face models (about 38 MB, once)…")
+        elif kind == "engine":
+            self.face_device = event["device"]
         elif kind == "progress":
             done, total = event["done"], event["total"]
             if self.people_eta_key != (event["id"], total):
@@ -1461,7 +1482,8 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, max(1, total))
             self.progress.setValue(done)
             self.progress.show()
-            self.status.setText(f"Finding people  ·  {done:,} of {total:,} photos  ·  "
+            device = f"  ·  on the {self.face_device}" if self.face_device else ""
+            self.status.setText(f"Finding people  ·  {done:,} of {total:,} photos{device}  ·  "
                                 f"{time_left_text(self.people_eta.remaining(done, total))}")
         elif kind == "cancelled":
             self.progress.hide()
@@ -1555,12 +1577,13 @@ class MainWindow(QMainWindow):
             menu.addAction(f"Not {name}",
                            lambda: self._change_face(lambda repository: repository.reject_face(face.id, face.person_id)))
             menu.addSeparator()
-        others = [person for person in self.people_list if person.id != face.person_id]
+        # Named, shown people only, as in Merge Into: a hidden person isn't listed anywhere to find again.
+        others = [person for person in self.people_list
+                  if person.id != face.person_id and person.name and not person.hidden]
         if others:
-            choose = menu.addMenu("This Is…")
-            for person in sorted(others, key=lambda entry: (not entry.name, entry.name.casefold(), -entry.count)):
-                label = person.name or f"{UNNAMED} ({person.count:,} photos)"
-                choose.addAction(label, lambda person=person: self._change_face(
+            choose = menu.addMenu("This Is…")  # named people only; New Person… names someone new
+            for person in sorted(others, key=lambda entry: (entry.name.casefold(), -entry.count)):
+                choose.addAction(person.name, lambda person=person: self._change_face(
                     lambda repository: repository.assign_face(face.id, person.id)))
         menu.addAction("New Person…", lambda: self._name_face(face))
         self._exec_menu(menu, position)
@@ -1700,7 +1723,11 @@ class MainWindow(QMainWindow):
         """Ask for a group's name and people. Separate so tests can answer it."""
         dialog = GroupDialog(self.people_list, name, members, title, self)
         try:
-            return (dialog.selected_name, dialog.selected_members) if dialog.exec() else None
+            if not dialog.exec():
+                return None
+            # Members the dialog didn't list stay in the group rather than being dropped unseen.
+            kept = [member for member in members if member not in dialog.offered]
+            return dialog.selected_name, dialog.selected_members + kept
         finally:
             dialog.deleteLater()
 
@@ -1727,10 +1754,10 @@ class MainWindow(QMainWindow):
         answer = self._open_group_dialog("Edit Group", group.name, group.members)
         if answer is not None:
             name, chosen = answer
-            # Members with no photo shown right now (say, only in a hidden album) aren't in the dialog;
+            # Members with no photo shown right now (say, only in a hidden album) aren't in people_list;
             # they stay in the group rather than being dropped unseen.
             offered = {person.id for person in self.people_list}
-            chosen = list(chosen) + [member for member in group.members if member not in offered]
+            chosen = list(chosen) + [member for member in group.members if member not in offered and member not in chosen]
             self._change_people(lambda repository: repository.update_group(group_id, name, chosen))
 
     def rename_group(self, group_id: int) -> None:
@@ -1887,6 +1914,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(REVEAL_LABEL, lambda: self.reveal_item(items[0])).setEnabled(single)
         menu.addAction("Open in Default App", lambda: self.open_in_default_app(items[0])).setEnabled(single)
+        menu.addAction("Export…" if single else f"Export {len(items):,} Items…", self.export_selected)
         menu.addSeparator()
         if self.scope_kind == "person":
             name = self.sidebar.person_name(self.scope_album)
@@ -1897,6 +1925,80 @@ class MainWindow(QMainWindow):
         menu.addAction(label, self.move_to_trash)
         self._exec_menu(menu, self.view.viewport().mapToGlobal(position))
         menu.deleteLater()  # it holds the selection: kept, every right-click would keep its items alive
+
+    # Export -----------------------------------------------------------------
+
+    def _choose_export_folder(self, count: int) -> Path | None:
+        """Ask where to export. Separate so tests can answer it."""
+        title = f"Export {count:,} Item{'s' if count != 1 else ''} To"
+        selected = QFileDialog.getExistingDirectory(self, title, str(Path.home() / "Pictures"))
+        return Path(selected) if selected else None
+
+    def export_selected(self) -> None:
+        """Copy the selected photos and videos (originals, as they are) into a folder the user picks."""
+        items = self.target_items()
+        if not items:
+            self.status.setText("Select photos or videos to export (in All Photos, Edit ▸ Select All selects everything)")
+            return
+        if self.export_thread is not None and self.export_thread.is_alive():
+            self.status.setText("An export is already running")
+            return
+        folder = self._choose_export_folder(len(items))
+        if folder is None:
+            return
+        self.export_id += 1
+        export_id = self.export_id
+        stop = self.export_stop = threading.Event()
+        paths = [item.path for item in items]  # a Live Photo's still only: its clip isn't an item here
+        roots = list(self.roots)
+        emit = self.export_events.received.emit
+
+        def run():
+            try:
+                # The check that the folder is outside the library runs here, off the UI thread.
+                result = export_files(paths, folder, stop, lambda done, total: emit(
+                    {"type": "progress", "id": export_id, "done": done, "total": total}), roots=roots)
+                emit({"type": "done", "id": export_id, "result": result, "folder": folder})
+            except Exception as exc:  # reported on the UI thread
+                LOGGER.exception("Export failed")
+                emit({"type": "error", "id": export_id, "message": str(exc)})
+
+        self.export_thread = threading.Thread(target=run, daemon=True, name="export")
+        self.export_thread.start()
+
+    def stop_export(self) -> None:
+        self.export_stop.set()
+        if self.export_thread is not None:
+            # The copy stops within one chunk and removes its partial file; wait briefly for that,
+            # as closeEvent already does for the IO pool.
+            self.export_thread.join(2)
+
+    def _handle_export_event(self, event: dict) -> None:
+        if event.get("id") != self.export_id:
+            return
+        kind = event["type"]
+        if kind == "progress":
+            self.status.setText(f"Exporting  ·  {event['done']:,} of {event['total']:,}")
+        elif kind == "error":
+            self._error("Export failed", event.get("message") or "Details were written to the application log.")
+        elif kind == "done":
+            result, folder = event["result"], event["folder"]
+            if result.refused:
+                self.status.setText(self.ready_text)
+                self._error("Can't export to that folder", result.refused)
+                return
+            copied = f"{result.copied:,} item{'s' if result.copied != 1 else ''}"
+            text = f"Exported {copied} to “{folder.name or folder}”"
+            if result.renamed:
+                text += f"  ·  {result.renamed:,} renamed, as the name was taken"
+            if result.cancelled:
+                text = f"Export stopped after {copied}"
+            self.status.setText(text)
+            if result.failed:
+                names = "\n".join(f"• {path.name}: {reason}" for path, reason in result.failed[:8])
+                more = f"\n…and {len(result.failed) - 8:,} more" if len(result.failed) > 8 else ""
+                self._error("Some items were not exported",
+                            f"{len(result.failed):,} item(s) could not be copied:\n\n{names}{more}")
 
     def move_to_trash(self) -> None:
         items = self.target_items()
@@ -2022,12 +2124,19 @@ class MainWindow(QMainWindow):
     def show_preferences(self) -> None:
         dialog = PreferencesDialog(self.settings.theme, self.settings.time_format, self.settings.watch_folder, self,
                                    find_people=self.settings.find_people, faces_available=FACES_ENABLED,
-                                   thumbnail_quality=self.settings.thumbnail_quality)
+                                   thumbnail_quality=self.settings.thumbnail_quality,
+                                   use_gpu=self.settings.use_gpu if GPU_SUPPORTED else None,
+                                   gpu_available=gpu_runtime_installed())
         dialog.clear_removed_requested.connect(lambda: self.clear_removed_thumbnails(dialog))
         dialog.clear_all_requested.connect(lambda: self.clear_all_thumbnails(dialog))
         self._show_cache_info(dialog)
         try:
             if self._exec_dialog(dialog):
+                use_gpu = dialog.selected_use_gpu
+                if use_gpu is not None and use_gpu != self.settings.use_gpu:
+                    self.settings.use_gpu = use_gpu
+                    if self.settings.find_people and dialog.selected_find_people and self.people_pending:
+                        self.start_people()  # carry on with the newly chosen device
                 if dialog.selected_find_people != self.settings.find_people:
                     self.settings.find_people = dialog.selected_find_people
                     self.review_action.setEnabled(self.settings.find_people)
@@ -2172,6 +2281,7 @@ class MainWindow(QMainWindow):
         self.stop_event.set()
         self.stop_warming()
         self.stop_people()
+        self.stop_export()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self._save_settings()
         cancel_queued(self.query_pool)

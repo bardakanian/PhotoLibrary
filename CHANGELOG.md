@@ -5,6 +5,51 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.23.0 — 2026-11-17
+
+- **A face-finding error no longer loses a photo's people.** When the face engine fails on a
+  photo (the graphics card runs out of memory, its driver resets), the photo is no longer saved
+  as "no faces" and is tried again next time. The graphics card engine also finds that photo's
+  faces on the processor straight away.
+- **Export can stop mid-file:** files are copied in 4 MB chunks, so closing the window during an
+  export stops it within a moment and removes the partial copy (it used to freeze for up to 5 s
+  and could leave a hidden `.export-part` file). A partial copy left by a crash is replaced.
+- Export takes the next numbered name if another program creates a file of the same name while
+  copying, instead of reporting it as failed. On macOS, the copy can no longer replace such a file.
+- The "inside your library" check for the export folder runs on the export thread, so a sleeping
+  drive can't freeze the window.
+- Groups find their photos through the people index again (the 1.20.0 query read every face for
+  each group on every sidebar refresh).
+- The graphics card option is offered only when `onnxruntime-gpu` is installed (the CPU-only
+  `onnxruntime` package can't use the card). This is checked once at start-up.
+- The viewer's "This Is…" menu leaves out hidden people, as Merge Into does.
+- **Groups show only their own people:** a group now lists the photos in which everyone in it
+  appears and no one else does. A face of anyone outside the group, named or not, or a face the
+  app couldn't match to anyone (a stranger in the background), keeps the photo out. A group of
+  one person shows the photos of them alone. Counts and covers follow.
+- **Export:** select photos and videos (Edit ▸ Select All for everything shown) and choose
+  File ▸ Export… (⇧⌘E), or right-click ▸ Export N Items…, to copy them into a folder you pick.
+  The originals are copied exactly as they are (HEIC stays HEIC, dates kept), all into that one
+  folder. A name that is already taken gets a number ("IMG_0001 (2).heic"), so nothing is
+  overwritten. A Live Photo is exported as its photo only. Each file is written under a
+  temporary name and renamed when complete, so a failed or stopped export leaves no
+  half-written file. A folder inside the library is refused, since every copy would show twice.
+- **Only named people are offered** in Add to Group (right-click a person; unnamed people no
+  longer show it), in the New Group and Edit Group lists, and in the viewer's "This Is…" menu,
+  as in Merge Into. An unnamed person already in a group stays listed in Edit Group, so they can
+  be taken out. Name someone first, or use "New Person…" in the viewer.
+- **Merge Into** (right-click a person) lists only the named people under People, not every
+  unnamed or hidden group, so the menu stays short and the target is someone you recognise.
+- **People on an NVIDIA graphics card (Windows):** Settings has a new option, **Use the NVIDIA
+  graphics card (CUDA) to find faces**. It runs the same YuNet and SFace models through ONNX
+  Runtime's CUDA provider, about twice as fast as the processor on an RTX 4080 SUPER (13 ms
+  instead of 28 ms per 1080p photo with 8 workers). The faces, boxes and fingerprints match the
+  processor's (cosine similarity 0.9999), so turning it on or off doesn't re-analyse any photo.
+  Install it with `requirements-cuda.txt`. If the card or its libraries can't be used, faces
+  are found on the processor and the reason is logged. While people are found, the status bar
+  says which one is in use. The option is hidden on macOS, which works as before.
+- The People note in Settings says "this computer" instead of "this Mac" off macOS.
+
 ## 1.22.2 — 2026-11-24
 
 - Fix: installing the app no longer leaves a second copy of it behind in the project folder. The installer built the bundle in `dist/` and then copied it into Applications, so every install produced an identical twin that duplicate scanners flagged. It now builds in a temporary folder that is discarded after installing. `--no-install` still writes to `dist/` as before.

@@ -1,3 +1,5 @@
+import sys
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -15,7 +17,9 @@ class PreferencesDialog(QDialog):
 
     def __init__(self, current_theme: str, current_time_format: str = "system", watch_folder: bool = True,
                  parent=None, *, find_people: bool = False, faces_available: bool = True,
-                 thumbnail_quality: str = "standard"):
+                 thumbnail_quality: str = "standard", use_gpu: bool | None = None,
+                 gpu_available: bool = False):
+        """`use_gpu=None` leaves out the graphics card option (macOS)."""
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -54,13 +58,28 @@ class PreferencesDialog(QDialog):
         self.find_people.setChecked(find_people and faces_available)
         self.find_people.setEnabled(faces_available)
         layout.addWidget(self.find_people)
+        computer = "Mac" if sys.platform == "darwin" else "computer"
         people_note = QLabel(
-            "Faces are found and grouped on this Mac; no photo or face ever leaves it. The first time, "
+            f"Faces are found and grouped on this {computer}; no photo or face ever leaves it. The first time, "
             "two small open models (about 38 MB) are downloaded from the OpenCV model zoo."
             if faces_available else "Needs OpenCV: run pip install opencv-python-headless, then reopen the app.")
         people_note.setProperty("muted", True)
         people_note.setWordWrap(True)
         layout.addWidget(people_note)
+        self.use_gpu: QCheckBox | None = None
+        if use_gpu is not None:
+            self.use_gpu = QCheckBox("Use the NVIDIA graphics card (CUDA) to find faces")
+            self.use_gpu.setChecked(use_gpu and gpu_available)
+            self.use_gpu.setEnabled(faces_available and gpu_available)
+            layout.addWidget(self.use_gpu)
+            gpu_note = QLabel(
+                "Faster on a large library. If the card can't be used, faces are found on the processor instead."
+                if gpu_available else
+                "Needs an NVIDIA graphics card and ONNX Runtime for CUDA: run "
+                "pip install -r requirements-cuda.txt, then reopen the app.")
+            gpu_note.setProperty("muted", True)
+            gpu_note.setWordWrap(True)
+            layout.addWidget(gpu_note)
         storage_heading = QLabel("Storage")
         storage_heading.setProperty("role", "section")
         layout.addWidget(storage_heading)
@@ -130,6 +149,13 @@ class PreferencesDialog(QDialog):
         return self.find_people.isChecked()
 
     @property
+    def selected_use_gpu(self) -> bool | None:
+        """None when the option isn't shown, or can't be used, so the saved choice is kept."""
+        if self.use_gpu is None or not self.use_gpu.isEnabled():
+            return None
+        return self.use_gpu.isChecked()
+
+    @property
     def selected_watch_folder(self) -> bool:
         return self.watch_folder.isChecked()
 
@@ -139,7 +165,7 @@ class PreferencesDialog(QDialog):
 
 
 class GroupDialog(QDialog):
-    """Name a group and tick its people. A group shows the photos where all of them appear together."""
+    """Name a group and tick its people. A group shows the photos of all of them, and no one else."""
 
     def __init__(self, people, name: str = "", selected=(), title: str = "New Group", parent=None):
         super().__init__(parent)
@@ -155,7 +181,7 @@ class GroupDialog(QDialog):
         form = QFormLayout()
         form.addRow("Name", self.name)
         layout.addLayout(form)
-        note = QLabel("Shows the photos in which everyone ticked appears together.")
+        note = QLabel("Shows the photos of everyone ticked together, with no one else in them.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -163,7 +189,15 @@ class GroupDialog(QDialog):
         self.list.setAccessibleName("People in the group")
         self.list.setSpacing(3)
         chosen = set(selected)
-        for person in sorted(people, key=lambda entry: (not entry.name, entry.name.casefold(), -entry.count)):
+        # Named people only. An unnamed member already in the group stays listed, so it can be ticked off.
+        offered = [person for person in people if person.name or person.id in chosen]
+        self.offered = {person.id for person in offered}
+        if not any(person.name for person in offered):
+            empty = QLabel("Name people first (right-click a person ▸ Name…), then add them to a group.")
+            empty.setProperty("muted", True)
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        for person in sorted(offered, key=lambda entry: (not entry.name, entry.name.casefold(), -entry.count)):
             label = person.name or f"Unnamed person ({person.count:,} photos)"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, person.id)

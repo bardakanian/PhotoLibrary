@@ -174,13 +174,23 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
-# Photos in which every member of a group (bound twice: ?, ?) has a face. A group with no members has none.
+# Photos of a group's members and no one else: every member has a face in the photo, and every face
+# in it is a member's. A face of anyone else, or one not matched to anyone (person_id NULL: NULL IN
+# (…) is not true), keeps the photo out. A group with no members has none. Bind the group id
+# _TOGETHER_BINDS times.
 _TOGETHER = """
     SELECT faces.media_id FROM faces
-    WHERE faces.person_id IN (SELECT person_id FROM person_group_members WHERE group_id = ?)
+    WHERE faces.media_id IN (  -- photos with a member in them, found through idx_faces_person
+        SELECT member_faces.media_id FROM faces AS member_faces
+        WHERE member_faces.person_id IN (SELECT person_id FROM person_group_members WHERE group_id = ?))
     GROUP BY faces.media_id
-    HAVING COUNT(DISTINCT faces.person_id) = (SELECT COUNT(*) FROM person_group_members WHERE group_id = ?)
+    HAVING COUNT(DISTINCT CASE WHEN faces.person_id IN (SELECT person_id FROM person_group_members WHERE group_id = ?)
+                               THEN faces.person_id END)
+           = (SELECT COUNT(*) FROM person_group_members WHERE group_id = ?)
+       AND SUM(CASE WHEN faces.person_id IN (SELECT person_id FROM person_group_members WHERE group_id = ?)
+                    THEN 0 ELSE 1 END) = 0
 """
+_TOGETHER_BINDS = 4
 
 # People kept (with their reference face) while they have no faces: named and hidden people, and
 # group members, so a regroup doesn't silently drop someone from a group or lose a hidden person.
@@ -280,7 +290,7 @@ class MediaRepository:
             params.append(album)
         if group is not None:
             sql += f" AND id IN ({_TOGETHER})"
-            params += [group, group]
+            params += [group] * _TOGETHER_BINDS
         if person is not None:
             # "id IN (…)" builds the person's photo list once. An EXISTS per photo made SQLite walk all
             # of the person's faces for every photo: 29 s for someone with 6,000 faces.
@@ -700,7 +710,7 @@ class MediaRepository:
     # Groups of people -------------------------------------------------------
 
     def person_groups(self, folders: Folders, hidden: HiddenAlbums = ()) -> list[PeopleGroup]:
-        """Every group, alphabetically, with how many shown photos have all its members together."""
+        """Every group, alphabetically, with how many shown photos have its members, and no one else, together."""
         where, params = _visible_in(normalize_roots(folders), hidden)
         connection = open_database()
         try:
@@ -709,9 +719,10 @@ class MediaRepository:
                 members = tuple(row[0] for row in connection.execute(
                     "SELECT person_id FROM person_group_members WHERE group_id = ? ORDER BY person_id", (group_id,)))
                 together = f"FROM media WHERE {where} AND {VISIBLE} AND id IN ({_TOGETHER})"
-                count = connection.execute(f"SELECT COUNT(*) {together}", [*params, group_id, group_id]).fetchone()[0]
+                binds = [*params] + [group_id] * _TOGETHER_BINDS
+                count = connection.execute(f"SELECT COUNT(*) {together}", binds).fetchone()[0]
                 cover = connection.execute(f"SELECT {_ITEM_COLUMNS} {together} ORDER BY capture_ts DESC, id DESC LIMIT 1",
-                                           [*params, group_id, group_id]).fetchone()
+                                           binds).fetchone()
                 found.append(PeopleGroup(group_id, name, members, int(count), _item_from_row(cover) if cover else None))
             found.sort(key=lambda group: (group.name.casefold(), group.id))
             return found

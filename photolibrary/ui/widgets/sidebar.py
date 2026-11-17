@@ -503,6 +503,14 @@ class Sidebar(QFrame):
         return [header.child(row) for header in (self.people_header, self.unnamed_header, self.hidden_people_header)
                 for row in range(header.rowCount()) if header.child(row).data(ScopeRole)]
 
+    def merge_targets(self, person_id: int) -> list[tuple[int, str]]:
+        """(id, name) of the people `person_id` can be merged into: the named ones listed under People."""
+        return [(person.id, person.name) for person in self._people
+                if person.name and not person.hidden and person.id != person_id]
+
+    def is_named(self, person_id: int) -> bool:
+        return any(person.id == person_id and person.name for person in self._people)
+
     def person_name(self, person_id: int) -> str:
         item = next((item for item in self._person_items() if item.data(ScopeRole) == ("person", person_id)), None)
         return item.text() if item is not None else UNNAMED
@@ -588,24 +596,25 @@ class Sidebar(QFrame):
             person = scope[1]
             menu.addAction("Name…", lambda: self.rename_person_requested.emit(person))
             menu.addAction("Check Faces (Least Typical First)", lambda: self.check_person_requested.emit(person))
-            others = [item for item in self._person_items() if item.data(ScopeRole) != scope]
+            others = self.merge_targets(person)
             if others:
                 merge = menu.addMenu("Merge Into")
-                for other in others:
-                    target = other.data(ScopeRole)[1]
-                    merge.addAction(other.text(), lambda target=target: self.merge_people_requested.emit(target, person))
+                for target, name in others:
+                    merge.addAction(name, lambda target=target: self.merge_people_requested.emit(target, person))
             hidden = self.hidden_people_header.model() is not None and any(
                 item.data(ScopeRole) == scope for item in
                 (self.hidden_people_header.child(row) for row in range(self.hidden_people_header.rowCount())))
             menu.addAction("Show Person" if hidden else "Hide Person",
                            lambda: self.hide_person_requested.emit(person, not hidden))
-            groups = menu.addMenu("Add to Group")
-            for group in self._groups:
-                if person not in group.members:
-                    groups.addAction(group.name, lambda group=group.id: self.add_to_group_requested.emit(group, person))
-            if self._groups:
-                groups.addSeparator()
-            groups.addAction("New Group…", lambda: self.new_group_requested.emit([person]))
+            if self.is_named(person):  # name someone before putting them in a group
+                groups = menu.addMenu("Add to Group")
+                for group in self._groups:
+                    if person not in group.members:
+                        groups.addAction(group.name,
+                                         lambda group=group.id: self.add_to_group_requested.emit(group, person))
+                if self._groups:
+                    groups.addSeparator()
+                groups.addAction("New Group…", lambda: self.new_group_requested.emit([person]))
             menu.addSeparator()
         elif scope and scope[0] == "group":
             group = scope[1]
