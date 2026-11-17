@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import sys
 import unittest
@@ -565,6 +566,11 @@ class PeopleWindowTests(WindowTestCase):
         named = self.window.sidebar.people_header
         self.wait_until(lambda: named.rowCount() == 1 and named.child(0).text() == "Ana", message="renamed")
         self.assertEqual(header.rowCount(), 1)  # Ben, still unnamed
+        sidebar = self.window.sidebar
+        self.assertEqual(sidebar.merge_targets(ben), [(ana, "Ana")])  # only named people are offered
+        self.assertEqual(sidebar.merge_targets(ana), [])  # never itself, nor unnamed Ben
+        self.assertTrue(sidebar.is_named(ana))  # so Ana can be added to a group…
+        self.assertFalse(sidebar.is_named(ben))  # …and Ben can't, until named
         self.window.set_person_hidden(ben, True)
         self.wait_until(lambda: self.window.sidebar.hidden_people_header.rowCount() == 1, message="hidden")
         self.assertIsNone(header.model())  # no unnamed people shown: the section goes
@@ -843,14 +849,14 @@ class PeopleGroupWindowTests(WindowTestCase):
         self.wait_until(lambda: len(window.model.items) == 3, message="photos together")
         self.assertTrue(all(item.name in {"g09.jpg", "g10.jpg", "g11.jpg"} for item in window.model.items))
         self.assertEqual(window.folder_status.text().split("  ·  ")[0], "Family")
-        # Rename, then take a member out: a group of one person shows all their photos.
+        # Rename, then take a member out: a group of one person shows the photos of them alone.
         with patch("photolibrary.ui.main_window.QInputDialog.getText", return_value=("Us", True)):
             window.rename_group(groups.child(0).data(ScopeRole)[1])
         self.wait_until(lambda: groups.rowCount() and groups.child(0).text() == "Us", message="renamed")
         group = groups.child(0).data(ScopeRole)[1]
         with patch.object(window, "_open_group_dialog", return_value=("Us", [self.first])):
             window.edit_group(group)
-        self.wait_until(lambda: len(window.model.items) == 8, message="one member's photos")
+        self.wait_until(lambda: len(window.model.items) == 5, message="the photos of one member alone")
         self.assertEqual(window.scope_kind, "group")  # a sidebar refresh keeps the group selected
         def confirm(dialog):
             next(button for button in dialog.buttons() if button.text() == "Delete Group").click()
@@ -863,7 +869,12 @@ class PeopleGroupWindowTests(WindowTestCase):
     def test_the_dialog_needs_a_name_and_two_people(self):
         from PySide6.QtWidgets import QDialogButtonBox
         from photolibrary.ui.dialogs import GroupDialog
-        dialog = GroupDialog(self.window.people_list, selected=[self.first])
+        unnamed = GroupDialog(self.window.people_list, selected=[self.first])
+        # Unnamed people aren't offered, except one already in the group (so it can be ticked off).
+        self.assertEqual(unnamed.offered, {self.first})
+        unnamed.deleteLater()
+        named = [dataclasses.replace(person, name=f"Person {person.id}") for person in self.window.people_list]
+        dialog = GroupDialog(named, selected=[self.first])
         save = dialog.buttons.button(QDialogButtonBox.StandardButton.Save)
         self.assertFalse(save.isEnabled())
         dialog.name.setText("Family")
@@ -874,6 +885,43 @@ class PeopleGroupWindowTests(WindowTestCase):
         self.assertEqual(sorted(dialog.selected_members), sorted([self.first, self.second]))
         dialog.deleteLater()
 
+
+
+class ExportWindowTests(WindowTestCase):
+    def test_select_all_and_export_copies_every_original(self):
+        import tempfile
+        window = self.window
+        window.select_all()
+        items = window.selected_items()
+        self.assertEqual(len(items), len(window.model.items))
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        target = Path(temp.name)
+        with patch.object(window, "_choose_export_folder", return_value=target):
+            window.export_selected()
+        self.wait_until(lambda: window.status.text().startswith("Exported"), message="exported")
+        exported = list(target.iterdir())
+        self.assertEqual(len(exported), len(items))
+        self.assertIn(f"Exported {len(items):,} items", window.status.text())
+        self.assertEqual(sorted(path.stat().st_size for path in exported), sorted(item.path.stat().st_size for item in items))
+
+    def test_exporting_into_the_library_is_refused(self):
+        window = self.window
+        window.select_all()
+        before = {path.name for path in window.roots[0].rglob("*")}
+        with patch.object(window, "_choose_export_folder", return_value=window.roots[0]), \
+                patch.object(window, "_error") as error:
+            window.export_selected()  # checked on the export thread, not the UI thread
+            self.wait_until(lambda: error.called, message="refused")
+        self.assertEqual(error.call_args[0][0], "Can't export to that folder")
+        self.assertEqual({path.name for path in window.roots[0].rglob("*")}, before)  # nothing copied
+
+    def test_nothing_selected_says_how(self):
+        self.window.view.clearSelection()
+        with patch.object(self.window, "_choose_export_folder") as choose:
+            self.window.export_selected()
+        choose.assert_not_called()
+        self.assertTrue(self.window.status.text().startswith("Select photos or videos to export"))
 
 
 class FullPageTests(WindowTestCase):

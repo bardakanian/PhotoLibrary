@@ -78,7 +78,7 @@ class Person:
 
 @dataclass(frozen=True, slots=True)
 class PeopleGroup:
-    """Several people together, like "Family": shows the photos in which they all appear."""
+    """Several people together, like "Family": shows the photos of them all, with no one else."""
 
     id: int
     name: str

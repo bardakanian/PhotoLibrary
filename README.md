@@ -67,7 +67,8 @@ incremental indexer) come from the On This Day app.
     passers-by) never produce questions.
   - **Groups:** right-click a person ▸ **Add to Group** ▸ **New Group…** (or View ▸ New
     Group…), name it and tick its people. The group, under **Groups** in the sidebar, shows the
-    photos in which everyone in it appears together. Right-click a group to rename it, edit its
+    photos of everyone in it together and no one else: a photo with anyone outside the group,
+    even a face the app couldn't match to anyone, is left out. Right-click a group to rename it, edit its
     members or delete it; deleting a group never touches its people or photos. A member stays in
     the group even while none of their photos are shown (for example, only in a hidden album).
   - **Check Faces:** right-click a person ▸ **Check Faces (Least Typical First)** (or View ▸
@@ -102,7 +103,11 @@ incremental indexer) come from the On This Day app.
   **Open in Default App** buttons. With several items selected it shows the count, the
   date range and the total size. It works in the viewer too.
 - **Selection** works like Photos: click, ⌘-click to add, ⇧-click for a range, ⌘A, and Esc
-  to deselect. Right-click for Open, Get Info, Reveal, Open in Default App and Move to Trash.
+  to deselect. Right-click for Open, Get Info, Reveal, Open in Default App, Export and Move to Trash.
+- **Export** (⇧⌘E, File ▸ Export…, or right-click) copies the selection, or the item open in
+  the viewer, into a folder you pick: the original files as they are, dates kept, all in that
+  one folder. A name already there gets a number ("IMG_0001 (2).heic"); nothing is overwritten.
+  Live Photos are exported as the photo only. To export everything shown, ⌘A first (in All Photos).
 - **Move to Trash** (⌘⌫) works on the selection, or on the item open in the viewer. It
   always asks first, names what will be moved, and uses the system Trash (`QFile.moveToTrash`),
   so files can be restored. Trashed items leave the grid without a reload, the scroll
@@ -155,7 +160,7 @@ A person's photos, with named people, unnamed people (the few-photo ones folded 
 
 ### A group
 
-The Family group shows only the photos in which everyone in it appears together. Review
+The Family group shows only the photos of everyone in it together, with no one else in them. Review
 Suggestions sits at the top of People when there is something to ask.
 
 ![The Family group with photos of Maya and Leo together](assets/screenshots/group.png)
@@ -221,6 +226,11 @@ Open **Settings** with ⌘, or the ⚙ button at the right end of the toolbar (a
   touched.
 - **Find people in photos** (off by default): turns on People. The first time, the two face
   models (about 38 MB) are downloaded. It needs OpenCV (`opencv-python-headless`).
+- **Use the NVIDIA graphics card (CUDA) to find faces** (Windows only, on by default once
+  installed): runs the same face models on an NVIDIA card through ONNX Runtime, about twice as
+  fast on a large library, with the same results. Install it with
+  `python -m pip install -r requirements-cuda.txt` (about 2 GB of CUDA libraries). If the card
+  can't be used, faces are found on the processor as before. The option isn't shown on macOS.
 
 Qt Multimedia's informational messages (the "Using Qt multimedia with FFmpeg" banner
 and FFmpeg's per-file stream details) are hidden. Warnings and errors still appear. To
@@ -242,6 +252,8 @@ QT_LOGGING_RULES="qt.multimedia.*=true" python app.py
   - imageio-ffmpeg (video dates, thumbnails and metadata)
   - watchdog (folder watching)
   - opencv-python-headless (People: finding and recognising faces; brings numpy)
+- Optional on Windows, in `requirements-cuda.txt`: onnxruntime-gpu with its CUDA 12 and cuDNN
+  libraries, and onnx (People on an NVIDIA graphics card)
 
 The app still runs without pillow-heif, imageio-ffmpeg, watchdog or OpenCV; HEIC files, video
 previews, automatic updates or People are then limited or unavailable.
@@ -327,6 +339,7 @@ On macOS, ⌘ is Command. On Windows and Linux, use Ctrl.
 | **Items** | |
 | Open in the viewer | Double-click, Return, Space or ⌘↓ |
 | Move to Trash (asks first) | ⌘⌫ or Delete |
+| Export the selection to a folder | ⌘⇧E |
 | Reveal in Finder | ⌘⇧R |
 | Open in default app | ⌘⇧O |
 | More actions | Right-click an item |
@@ -403,6 +416,7 @@ photolibrary/
 │   ├── grid_layout.py     Sectioned grid geometry
 │   ├── search.py          Search box parsing (filename and dates)
 │   ├── trash.py           Move to Trash plus index and thumbnail cleanup
+│   ├── export.py          Export: copy originals into a folder, never overwriting
 │   ├── live_photos.py     Pairs Live Photo stills with their motion clips
 │   ├── faces.py           People: face models (download and checksum), finding faces in photos
 │   ├── people.py          People: grouping face fingerprints (DBSCAN) and keeping names stable
