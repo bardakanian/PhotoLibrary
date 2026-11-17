@@ -1,0 +1,6 @@
+# Optional, Windows with an NVIDIA graphics card: find faces with CUDA (Settings > Use the NVIDIA
+# graphics card). Installs ONNX Runtime for CUDA with its CUDA 12 and cuDNN libraries (about 2 GB).
+# Not used on macOS, where these packages are skipped.
+-r requirements.txt
+onnxruntime-gpu[cuda,cudnn]>=1.21; sys_platform == "win32"
+onnx>=1.16; sys_platform == "win32"

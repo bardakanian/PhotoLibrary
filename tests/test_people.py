@@ -427,16 +427,35 @@ class PeopleLibraryTests(TempAppTestCase):
         self.assertEqual(found.cover.name, "p07.jpg")  # the newest photo of them together
         self.assertEqual(sorted(item.name for item in self.repo.query(self.library, group=group)), ["p06.jpg", "p07.jpg"])
         self.assertEqual(len(self.repo.query(self.library, group=group, search=parse_query("p07"))), 1)
-        # One member: all their photos. No members: nothing.
+        # One member: only the photos with them alone (not the two with the other person). None: nothing.
         self.repo.update_group(group, name="Just one", members=[first.id])
-        self.assertEqual(len(self.repo.query(self.library, group=group)), 8)
+        self.assertEqual(len(self.repo.query(self.library, group=group)), 6)
         self.repo.update_group(group, members=[])
         self.assertEqual(self.repo.query(self.library, group=group), [])
         self.repo.add_to_group(group, second.id)
-        self.assertEqual(self.repo.person_groups(self.library)[0].count, 6)
+        self.assertEqual(self.repo.person_groups(self.library)[0].count, 4)
         self.repo.delete_group(group)
         self.assertEqual(self.repo.person_groups(self.library), [])
         self.assertEqual(len(self.people()), 2)  # people are untouched
+
+    def test_a_group_leaves_out_photos_with_anyone_else_even_an_unmatched_face(self):
+        # p16: the two of them with a third face, someone in no person's group (too few photos).
+        self.paths.append(write_people_photo(self.library / "Home" / "p16.jpg", datetime(2024, 2, 1), (1, 2)))
+        scan(self.library)
+        self.analyze()
+        first, second = self.people()
+        group = self.repo.create_group("Family", [first.id, second.id])
+        self.assertEqual(len(self.repo.query(self.library, group=group)), 3)  # p06, p07, p16
+        p16 = next(item for item in self.repo.query(self.library, group=group) if item.name == "p16.jpg")
+        connection = database.open_database()
+        try:  # a stranger's face, matched to no one, in the same photo
+            connection.execute("INSERT INTO faces (media_id, x, y, w, h, score, embedding, person_id) "
+                               "VALUES (?, 0.4, 0.4, 0.1, 0.1, 0.9, ?, NULL)", (p16.id, b"\0" * 512))
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertEqual(sorted(item.name for item in self.repo.query(self.library, group=group)), ["p06.jpg", "p07.jpg"])
+        self.assertEqual(self.repo.person_groups(self.library)[0].count, 2)
 
     def test_groups_follow_merges_and_survive_a_lost_database(self):
         self.analyze()

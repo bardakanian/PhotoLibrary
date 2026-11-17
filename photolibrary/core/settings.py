@@ -35,6 +35,8 @@ class AppSettings:
     find_people: bool = False
     # Grid thumbnails at 512 px ("standard") or 1,024 px ("high": sharp in big cells, more disk).
     thumbnail_quality: str = "standard"
+    # Windows only: find faces on an NVIDIA graphics card (CUDA) when one is usable. Ignored on macOS.
+    use_gpu: bool = True
 
 
 def _hidden_albums(value) -> list[tuple[str, str]]:
@@ -119,6 +121,7 @@ class SettingsStore:
             find_people=bool(data.get("find_people", False)),
             thumbnail_quality=(data.get("thumbnail_quality") if data.get("thumbnail_quality") in THUMBNAIL_QUALITIES
                                else "standard"),
+            use_gpu=bool(data.get("use_gpu", True)),
         )
 
     def save(self, settings: AppSettings, ticket: int | None = None) -> bool:
@@ -158,6 +161,7 @@ class SettingsStore:
             "collapsed_sections": list(settings.collapsed_sections),
             "find_people": settings.find_people,
             "thumbnail_quality": settings.thumbnail_quality,
+            "use_gpu": settings.use_gpu,
         })
         # Write then rename, so a crash mid-write never leaves a truncated config.
         temp = CONFIG_FILE.with_suffix(".tmp")
