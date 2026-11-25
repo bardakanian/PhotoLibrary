@@ -5,6 +5,11 @@ With every change, bump `VERSION` in `photolibrary/core/constants.py` and add an
 Versions before 1.6.0 were numbered afterwards from the git history: a minor version for each
 commit that added features, a patch version for each fix.
 
+## 1.22.2 — 2026-11-24
+
+- Fix: installing the app no longer leaves a second copy of it behind in the project folder. The installer built the bundle in `dist/` and then copied it into Applications, so every install produced an identical twin that duplicate scanners flagged. It now builds in a temporary folder that is discarded after installing. `--no-install` still writes to `dist/` as before.
+- Fix: a bundle left in `dist/` under an older app name is now removed on the next build instead of lingering forever.
+
 ## 1.22.1 — 2026-11-15
 
 Three bug fixes:
